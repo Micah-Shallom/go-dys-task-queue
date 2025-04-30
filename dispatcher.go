@@ -4,88 +4,102 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 )
 
+// dispatcher implements a worker pool pattern
 type Dispatcher struct {
-	queue         *PriorityQueue
-	workers       []*Worker
-	maxWorkers    int
-	scalingFactor int
-	wg            sync.WaitGroup
-	metrics       *Metrics
+	queue      *PriorityJobQueue
+	workerPool []*Worker
+	numWorkers int
+	wg         sync.WaitGroup
+	stopCh     chan struct{} //channel to signal all worker to stop
+	metrics    *Metrics
 }
 
-func NewDispatcher(maxWorkers, scalingFactor int) *Dispatcher {
+func NewDispatcher(numWorkers int) *Dispatcher {
 	fmt.Println("🚀 Dispatcher initialized!")
 	return &Dispatcher{
-		queue:         NewPriorityQueue(),
-		maxWorkers:    maxWorkers,
-		scalingFactor: scalingFactor,
-		metrics:       NewMetrics(),
+		queue:      NewPriorityJobQueue(),
+		numWorkers: numWorkers,
+		metrics:    NewMetrics(),
+		workerPool: make([]*Worker, 0, numWorkers),
+		stopCh:     make(chan struct{}),
+	}
+}
+
+func (d *Dispatcher) receiveTasks() {
+	//pop from the heap and populate the job queue
+	for {
+		if d.queue.taskHeap.Len() > 0 {
+			task := d.queue.taskHeap.Pop()
+			job := Job{task: task.(Task)}
+			d.queue.jobqueue <- job
+		}
 	}
 }
 
 func (d *Dispatcher) Start(ctx context.Context) {
-	fmt.Println("🟢 Dispatcher started!")
-	d.wg.Add(1)
-	go d.scaleWorkers(ctx)
-}
+	fmt.Println("🟢 Starting dispatcher with worker pool...")
 
-func (d *Dispatcher) Shutdown() {
-	fmt.Println("🔴 Shutting down dispatcher...")
-	for _, worker := range d.workers {
-		fmt.Printf("🛑 Stopping worker %d...\n", worker.id)
-		worker.Stop()
+	for i := range d.numWorkers {
+		worker := NewWorker(i, d.queue, d.metrics)
+		d.workerPool = append(d.workerPool, worker)
+
+		d.wg.Add(1)
+		go worker.Start(ctx, d.stopCh, &d.wg)
+		fmt.Printf("👷 Worker %d added to the pool\n", i)
+
+		//start receiving tasks
+		go d.receiveTasks()
+		//start dispatching tasks
+		go d.dispatch()
+
+		//monitor for context cancellation
+		go func() {
+			<-ctx.Done()
+			d.Stop()
+		}()
 	}
-	d.workers = nil
-	fmt.Println("✅ Dispatcher shutdown complete!")
+
+	fmt.Printf("✅ Worker pool ready with %d workers\n", d.numWorkers)
 }
 
-func (d *Dispatcher) scaleWorkers(ctx context.Context) {
-	defer d.wg.Done()
-
+func (d *Dispatcher) dispatch() {
 	for {
 		select {
-		case <-ctx.Done():
-			fmt.Println("⚠️ Context canceled, shutting down workers...")
-			d.Shutdown()
-			return
-
-		default:
-			queueLen := d.queue.Len()
-			desiredWorkers := queueLen / d.scalingFactor
-			if desiredWorkers < 1 {
-				desiredWorkers = 1
-			}
-			if desiredWorkers > d.maxWorkers {
-				desiredWorkers = d.maxWorkers
-			}
-
-			fmt.Printf("📊 Queue length: %d, Desired workers: %d, Current workers: %d\n", queueLen, desiredWorkers, len(d.workers))
-
-			// Scaling up workers
-			for len(d.workers) < desiredWorkers {
-				worker := NewWorker(len(d.workers)+1, d.queue, d.metrics)
-				d.workers = append(d.workers, worker)
-				fmt.Printf("⬆️ Starting worker %d...\n", worker.id)
-				d.wg.Add(1)
-				go worker.Start(ctx, &d.wg)
-			}
-
-			// Scaling down workers
-			for len(d.workers) > desiredWorkers {
-				if len(d.workers) == 0 {
-					break
+		case job := <- d.queue.jobqueue:
+			go func(job Job) {
+				worker := d.findAvailableWorker()
+				if worker != nil {
+					worker.JobChannel <- job
+					fmt.Printf("📤 Job %d dispatched to worker %d\n", job.task.ID, worker.id)
+				} else {
+					fmt.Println("⚠️ No available workers to process the job")
 				}
-				worker := d.workers[len(d.workers)-1]
-				d.workers = d.workers[:len(d.workers)-1]
-				fmt.Printf("⬇️ Stopping worker %d...\n", worker.id)
-				worker.Stop()
-			}
-			time.Sleep(1 * time.Second)
+			}(job)
 		}
 	}
+}
+
+
+func (d *Dispatcher) findAvailableWorker() *Worker {
+	for _, worker := range d.workerPool {
+		if !worker.running {
+			return worker
+		}
+	}
+	return nil
+}
+
+func (d *Dispatcher) Stop() {
+	fmt.Println("🔴 Shutting down dispatcher...")
+	close(d.stopCh) // Signal all workers to stop
+	fmt.Println("⏳ Waiting for all workers to complete...")
+}
+
+func (d *Dispatcher) Wait() {
+	d.wg.Wait()
+	fmt.Println("✅ All workers have completed, dispatcher shutdown complete!")
 }
 
 func (d *Dispatcher) Submit(task Task) {

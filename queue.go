@@ -1,6 +1,9 @@
 package main
 
-import "sync"
+import (
+	"container/heap"
+	"sync"
+)
 
 type Task struct {
 	ID       int
@@ -8,40 +11,70 @@ type Task struct {
 	Name     string
 }
 
-type PriorityQueue struct {
-	tasks []Task
-	mu    sync.Mutex
-	cond  *sync.Cond
+type Job struct {
+	task Task
 }
 
-func NewPriorityQueue() *PriorityQueue {
-	pq := &PriorityQueue{tasks: make([]Task, 0)}
-	pq.cond = sync.NewCond(&pq.mu)
+type PriorityJobQueue struct {
+	taskHeap priorityHeap //handles priority scheduling
+	jobqueue chan Job     //
+	mu       sync.Mutex
+}
+
+func NewPriorityJobQueue() *PriorityJobQueue {
+	pq := &PriorityJobQueue{
+		jobqueue: make(chan Job, 1),
+	}
+
+	go pq.process()
+
 	return pq
 }
 
-func (pq *PriorityQueue) Enqueue(task Task) {
+func (pq *PriorityJobQueue) Push(task Task) {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
-	for i := len(pq.tasks) - 1; i > 0 && pq.tasks[i].Priority < pq.tasks[i-1].Priority; i-- {
-		pq.tasks[i], pq.tasks[i-1] = pq.tasks[i-1], pq.tasks[i]
-	}
-	pq.cond.Signal()
+
+	heap.Push(&pq.taskHeap, task)
 }
 
-func (pq *PriorityQueue) Dequeue() Task {
-	pq.mu.Lock()
-	defer pq.mu.Unlock()
-	for len(pq.tasks) == 0 {
-		pq.cond.Wait() //blocks until signal is sent that a task has been enqueued
+func (pq *PriorityJobQueue) process() {
+	for {
+		pq.mu.Lock()
+		defer pq.mu.Unlock()
+
+		if pq.taskHeap.Len() > 0 {
+			task := pq.taskHeap.Pop()
+			pq.jobqueue <- Job{task: task.(Task)}
+		}
 	}
-	task := pq.tasks[0]
-	pq.tasks = pq.tasks[1:]
-	return task
 }
 
-func (pq *PriorityQueue) Len() int {
+func (pq *PriorityJobQueue) Pop() (Job, bool) {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
-	return len(pq.tasks)
+	task, ok := <-pq.jobqueue
+	return Job{task: task.task}, ok
+}
+
+// implement the heap interface
+type priorityHeap struct {
+	tasks  []Task
+	closed bool
+}
+
+func (h *priorityHeap) Len() int           { return len(h.tasks) }
+func (h *priorityHeap) Less(i, j int) bool { return h.tasks[i].Priority < h.tasks[j].Priority }
+func (h *priorityHeap) Swap(i, j int)      { h.tasks[i], h.tasks[j] = h.tasks[j], h.tasks[i] }
+
+func (h *priorityHeap) Push(x interface{}) {
+	h.tasks = append(h.tasks, x.(Task))
+}
+
+func (h *priorityHeap) Pop() interface{} {
+	old := h.tasks
+	n := len(old)
+	x := old[n-1]
+	h.tasks = old[0 : n-1]
+	return x
 }
