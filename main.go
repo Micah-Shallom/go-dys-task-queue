@@ -3,13 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
-	"time"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	
+
 	//simulate task generation
 	dataStore := generateData()
 
@@ -19,7 +21,7 @@ func main() {
 
 	go Producer(dataStore, dispatcher)
 
-	// //metrics reporting
+	//metrics reporting
 	// go func() {
 	// 	ticker := time.NewTicker(3 * time.Second)
 	// 	defer ticker.Stop()
@@ -34,8 +36,15 @@ func main() {
 	// 	}
 	// }()
 
-	time.Sleep(45 * time.Second)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// Wait for termination signal
+	sig := <-sigCh
+	fmt.Printf("Received signal: %s. Shutting down...\n", sig)
+
 	cancel()
+	dispatcher.Stop()
 	dispatcher.wg.Wait()
 	fmt.Println("Shutdown complete")
 }

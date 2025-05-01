@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"math/rand"
-	"sync"
 	"time"
 )
 
@@ -28,18 +27,17 @@ func generateData() []Task {
 }
 
 func Producer(data []Task, d *Dispatcher) {
-	mu := sync.Mutex{}
 
 	for {
-		mu.Lock()
+		d.disLock.Lock()
 
 		if len(data) > 0 {
 			task := data[0]
-			d.queue.taskHeap.Push(task)
+			d.queue.PushToHeap(task)
 			data = data[1:]
-			mu.Unlock()
+			d.disLock.Unlock()
 		} else {
-			mu.Unlock()
+			d.disLock.Unlock()
 
 			time.Sleep(100 * time.Millisecond)
 		}

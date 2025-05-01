@@ -16,44 +16,50 @@ type Job struct {
 }
 
 type PriorityJobQueue struct {
-	taskHeap priorityHeap //handles priority scheduling
-	jobqueue chan Job     //
-	mu       sync.Mutex
+	taskHeap      priorityHeap //handles priority scheduling
+	jobsQueue     chan Job     //
+	mu            sync.Mutex
+	notifyNewTask chan struct{}
+	metrics       *Metrics
 }
 
 func NewPriorityJobQueue() *PriorityJobQueue {
 	pq := &PriorityJobQueue{
-		jobqueue: make(chan Job, 1),
+		jobsQueue: make(chan Job, 1),
+		metrics:   NewMetrics(),
+		notifyNewTask: make(chan struct{}, 1), // buffered channel to avoid blocking
+		taskHeap: priorityHeap{
+			tasks: make([]Task, 0),
+			closed: false,
+		},
 	}
 
-	go pq.process()
+	heap.Init(&pq.taskHeap)
 
 	return pq
 }
 
-func (pq *PriorityJobQueue) Push(task Task) {
+func (pq *PriorityJobQueue) PushToHeap(task Task) {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
 	heap.Push(&pq.taskHeap, task)
-}
 
-func (pq *PriorityJobQueue) process() {
-	for {
-		pq.mu.Lock()
-		defer pq.mu.Unlock()
-
-		if pq.taskHeap.Len() > 0 {
-			task := pq.taskHeap.Pop()
-			pq.jobqueue <- Job{task: task.(Task)}
-		}
+	//signal the worker pool that a new task is available
+	select {
+	case pq.notifyNewTask <- struct{}{}:
+	default:
+		// non-blocking send
 	}
+
+	pq.metrics.IncrementHeapSize()
 }
 
-func (pq *PriorityJobQueue) Pop() (Job, bool) {
-	pq.mu.Lock()
-	defer pq.mu.Unlock()
-	task, ok := <-pq.jobqueue
+func (pq *PriorityJobQueue) PopFromQueue() (Job, bool) {
+	task, ok := <-pq.jobsQueue
+	if ok {
+		pq.metrics.DecrementJobsQueueCount()
+	}
 	return Job{task: task.task}, ok
 }
 
