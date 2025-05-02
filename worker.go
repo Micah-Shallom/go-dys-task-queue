@@ -4,49 +4,95 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type Worker struct {
-	id         int
-	JobChannel chan Job
-	metrics    *Metrics
-	running    bool
+	id              int
+	JobChannel      chan Job
+	maxJobPerWorker int32
+	metrics         *Metrics
+	running         bool
+	stopWorkerChan  chan struct{} //channel to signal worker is busy
+	jobCount        int32         //tracks the number of jobs in the worker job channel
+	idleSince       atomic.Value
+	idleTimeout     time.Duration
 }
 
-func NewWorker(id int, metrics *Metrics) *Worker {
+func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32) *Worker {
 	return &Worker{
-		id:         id,
-		JobChannel: make(chan Job),
-		metrics:    metrics,
-		running:    false,
+		id:              id,
+		maxJobPerWorker: maxJobPerWorker,
+		JobChannel:      make(chan Job, maxJobPerWorker),
+		metrics:         metrics,
+		running:         false,
+		stopWorkerChan:  make(chan struct{}),
+		jobCount:        0,
+		idleTimeout:     10 * time.Second, // Set idle timeout to 5 seconds
 	}
 }
 
-func (w *Worker) Start(ctx context.Context, stopCh <-chan struct{}, wg *sync.WaitGroup, queue *PriorityJobQueue) {
-	defer wg.Done()
-	w.running = true
+func (w *Worker) Stop() {
+	fmt.Printf("👷 Worker %d: Stopping\n", w.id)
+	w.running = false
+	close(w.JobChannel)
+	w.metrics.DecrementActiveWorkers()
+}
 
+func (w *Worker) signalAvailability(d *Dispatcher) { 
+	if w.GetJobCount() < w.maxJobPerWorker {
+		select{
+			case d.availableWorkers <- w:
+				//successfully signaled as available
+			default:
+				// channel is full, do nothing
+		}	
+	}
+}
+
+func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
+	defer d.wg.Done()
+	w.running = true
 	fmt.Printf("👷 Worker %d: Started and ready to process tasks\n", w.id)
+
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	w.signalAvailability(d)
 
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Printf("👷 Worker %d: Context canceled, stopping\n", w.id)
 			return
-		case <-stopCh:
+		case <-d.stopCh:
 			fmt.Printf("👷 Worker %d: Received stop signal, stopping\n", w.id)
+			w.metrics.DecrementActiveWorkers()
 			return
-		case job := <- w.JobChannel:
-			fmt.Printf("👷 Worker %d: Received job from channel\n", w.id)
-			w.metrics.IncrementActiveWorkers()
+		case <-w.stopWorkerChan:
+			fmt.Printf("👷 Worker %d: Received stop worker signal, stopping\n", w.id)
+			w.metrics.DecrementActiveWorkers()
+			return
+
+		case <-ticker.C: //implement a centralized idle ticker system for higher load scenerios
+			w.signalAvailability(d)
+
+			if w.idleTimeout > 0 && w.GetJobCount() == 0 && w.IsIdleLongEnough() {
+				fmt.Printf("👷 Worker %d: Idle for too long, stopping\n", w.id)
+				w.Stop()
+				return
+			}
+
+		case job := <-w.JobChannel:
 			err := w.processTask(job, time.Now())
 			if err != nil {
 				w.metrics.RecordFailure()
 				fmt.Printf("🔴 Worker %d: Failed to process task %d\n", w.id, job.task.ID)
 			}
-			w.metrics.DecrementActiveWorkers()
+			w.DecrementJobCount()
+			w.signalAvailability(d)
+			w.metrics.DecrementJobsQueueCount()
 		}
 	}
 }
@@ -60,8 +106,8 @@ func (w *Worker) processTask(job Job, startTime time.Time) error {
 	fmt.Printf("Worker %d: Processing task %d (Priority: %d, Name: %s)\n", w.id, job.task.ID, job.task.Priority, job.task.Name)
 	time.Sleep(2 * time.Second) //simulate work
 
-	// Simulate failure for ~10% of tasks
-	if rand.Float32() < 0.1 {
+	// Simulate failure for ~20% of tasks
+	if rand.Float32() < 0.2 {
 		return fmt.Errorf("simulated failure for task %d", job.task.ID)
 	}
 
@@ -81,4 +127,30 @@ func (w *Worker) processTask(job Job, startTime time.Time) error {
 			w.id, job.task.ID, time.Since(startTime))
 	}
 	return nil
+}
+
+func (w *Worker) IncrementJobCount() {
+	atomic.AddInt32((*int32)(&w.jobCount), 1)
+
+	w.idleSince.Store(time.Time{}) // Reset idle time
+}
+
+func (w *Worker) DecrementJobCount() {
+	count := atomic.AddInt32((*int32)(&w.jobCount), -1)
+	if count == 0 {
+		w.idleSince.Store(time.Now())
+	}
+}
+
+func (w *Worker) GetJobCount() int32 {
+	return atomic.LoadInt32((*int32)(&w.jobCount))
+}
+
+func (w *Worker) IsIdleLongEnough() bool {
+	idleTime, ok := w.idleSince.Load().(time.Time)
+	if !ok || idleTime.IsZero() {
+		return false
+	}
+
+	return time.Since(idleTime) >= w.idleTimeout
 }
