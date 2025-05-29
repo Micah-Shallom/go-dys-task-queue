@@ -1,45 +1,59 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"time"
 )
 
-func generateData() []Task {
-	var inMemoryDatabase []Task
-
-	for i := 0; i < 1_000; i++ {
-		var priority int
-		r := rand.Intn(10)
-		switch {
-		case r < 2:
-			priority = 1
-		case r < 5:
-			priority = 2
-		default:
-			priority = 3
-		}
-		task := Task{ID: i, Priority: priority, Name: fmt.Sprintf("Task-%d", i)}
-		inMemoryDatabase = append(inMemoryDatabase, task)
+func randomPriority() int {
+	r := rand.Intn(10)
+	switch {
+	case r < 2:
+		return 1
+	case r < 5:
+		return 2
+	default:
+		return 3
 	}
-	return inMemoryDatabase
 }
 
-func Producer(data []Task, d *Dispatcher) {
+func TaskFeeder(ctx context.Context, taskstream chan<- Task) {
+	id := 0
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println("🛑 TaskFeeder shutting down")
+			close(taskstream)
+		default:
+			priority := randomPriority()
+			task := Task{
+				ID:       id,
+				Priority: priority,
+				Name:     fmt.Sprintf("Task-%d", id),
+			}
+			taskstream <- task
+			id++
+			time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond) // simulate staggered arrival
+		}
+	}
+}
+
+func Producer(ctx context.Context, taskStream <-chan Task, d *Dispatcher) {
 
 	for {
-		d.disLock.Lock()
-
-		if len(data) > 0 {
-			task := data[0]
+		select {
+		case <-ctx.Done():
+			fmt.Println("🛑 Producer shutting down")
+			return
+		case task, ok := <-taskStream:
+			if !ok {
+				fmt.Println("🛑 Task stream closed, producer exiting")
+				return
+			}
+			fmt.Println(task)
 			d.queue.PushToHeap(task)
-			data = data[1:]
-			d.disLock.Unlock()
-		} else {
-			d.disLock.Unlock()
-
-			time.Sleep(100 * time.Millisecond)
 		}
 	}
 }

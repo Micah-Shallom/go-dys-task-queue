@@ -2,6 +2,7 @@ package main
 
 import (
 	"container/heap"
+	"fmt"
 	"sync"
 )
 
@@ -25,7 +26,7 @@ type PriorityJobQueue struct {
 
 func NewPriorityJobQueue() *PriorityJobQueue {
 	pq := &PriorityJobQueue{
-		jobsQueue: make(chan Job, 1),
+		jobsQueue: make(chan Job, 1000),
 		metrics:   NewMetrics(),
 		notifyNewTask: make(chan struct{}, 1), // buffered channel to avoid blocking
 		taskHeap: priorityHeap{
@@ -39,9 +40,13 @@ func NewPriorityJobQueue() *PriorityJobQueue {
 	return pq
 }
 
-func (pq *PriorityJobQueue) PushToHeap(task Task) {
+func (pq *PriorityJobQueue) PushToHeap(task Task) error {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
+
+	if pq.taskHeap.closed {
+		return fmt.Errorf("task heap is closed")
+	}
 
 	heap.Push(&pq.taskHeap, task)
 
@@ -53,14 +58,30 @@ func (pq *PriorityJobQueue) PushToHeap(task Task) {
 	}
 
 	pq.metrics.IncrementHeapSize()
+	return nil
 }
 
-func (pq *PriorityJobQueue) PopFromQueue() (Job, bool) {
+func (pq *PriorityJobQueue) PopFromJobQueue() (Job, bool) {
 	task, ok := <-pq.jobsQueue
 	if ok {
 		pq.metrics.DecrementJobsQueueCount()
 	}
 	return Job{task: task.task}, ok
+}
+
+func (pq *PriorityJobQueue) Close() {
+    pq.mu.Lock()
+    defer pq.mu.Unlock()
+
+    // Mark the task heap as closed
+    pq.taskHeap.closed = true
+
+    // Close channels
+    close(pq.jobsQueue)
+    close(pq.notifyNewTask)
+
+    // Clear the task heap
+    pq.taskHeap.tasks = nil
 }
 
 // implement the heap interface
@@ -84,3 +105,21 @@ func (h *priorityHeap) Pop() interface{} {
 	h.tasks = old[0 : n-1]
 	return x
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

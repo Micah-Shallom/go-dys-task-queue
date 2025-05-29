@@ -13,7 +13,6 @@ type Worker struct {
 	JobChannel      chan Job
 	maxJobPerWorker int32
 	metrics         *Metrics
-	running         bool
 	stopWorkerChan  chan struct{} //channel to signal worker is busy
 	jobCount        int32         //tracks the number of jobs in the worker job channel
 	idleSince       atomic.Value
@@ -26,7 +25,6 @@ func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32) *Worker {
 		maxJobPerWorker: maxJobPerWorker,
 		JobChannel:      make(chan Job, maxJobPerWorker),
 		metrics:         metrics,
-		running:         false,
 		stopWorkerChan:  make(chan struct{}),
 		jobCount:        0,
 		idleTimeout:     10 * time.Second, // Set idle timeout to 5 seconds
@@ -35,25 +33,27 @@ func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32) *Worker {
 
 func (w *Worker) Stop() {
 	fmt.Printf("👷 Worker %d: Stopping\n", w.id)
-	w.running = false
 	close(w.JobChannel)
 	w.metrics.DecrementActiveWorkers()
 }
 
-func (w *Worker) signalAvailability(d *Dispatcher) { 
+func (w *Worker) signalAvailability(d *Dispatcher) {
+	timeout := 5 * time.Second // Set a timeout for finding an available worker
+
 	if w.GetJobCount() < w.maxJobPerWorker {
-		select{
-			case d.availableWorkers <- w:
-				//successfully signaled as available
-			default:
-				// channel is full, do nothing
-		}	
+		select {
+		case d.availableWorkers <- w:
+			//successfully signaled as available
+		case <-time.After(timeout):
+			//timeout, worker is busy
+			fmt.Printf("👷 Worker %d: No available workers, busy processing tasks\n", w.id)
+			return
+		}
 	}
 }
 
 func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 	defer d.wg.Done()
-	w.running = true
 	fmt.Printf("👷 Worker %d: Started and ready to process tasks\n", w.id)
 
 	ticker := time.NewTicker(3 * time.Second)
@@ -66,16 +66,17 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 		case <-ctx.Done():
 			fmt.Printf("👷 Worker %d: Context canceled, stopping\n", w.id)
 			return
-		case <-d.stopCh:
+		case <-d.stopCh: //general signal from dispatcher
 			fmt.Printf("👷 Worker %d: Received stop signal, stopping\n", w.id)
 			w.metrics.DecrementActiveWorkers()
 			return
-		case <-w.stopWorkerChan:
+		case <-w.stopWorkerChan: //signal to terminate worker
 			fmt.Printf("👷 Worker %d: Received stop worker signal, stopping\n", w.id)
 			w.metrics.DecrementActiveWorkers()
 			return
 
-		case <-ticker.C: //implement a centralized idle ticker system for higher load scenerios
+		//remember to implement a centralized idle ticker system for higher load scenerios
+		case <-ticker.C:
 			w.signalAvailability(d)
 
 			if w.idleTimeout > 0 && w.GetJobCount() == 0 && w.IsIdleLongEnough() {
@@ -98,10 +99,6 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 }
 
 func (w *Worker) processTask(job Job, startTime time.Time) error {
-	w.running = true
-	defer func() {
-		w.running = false
-	}()
 
 	fmt.Printf("Worker %d: Processing task %d (Priority: %d, Name: %s)\n", w.id, job.task.ID, job.task.Priority, job.task.Name)
 	time.Sleep(2 * time.Second) //simulate work

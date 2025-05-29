@@ -3,14 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
-	"slices"
 )
 
 // dispatcher implements a worker pool pattern
 type Dispatcher struct {
-	queue            *PriorityJobQueue
+	queue            *PriorityJobQueue //jobs are read from this queue into the heap for priority processing
 	workerPool       []*Worker
 	availableWorkers chan *Worker
 	numWorkers       int
@@ -52,8 +52,20 @@ func (d *Dispatcher) receiveTasksFromHeap(ctx context.Context) {
 				d.queue.mu.Unlock()
 
 				job := Job{task: task.(Task)}
-				d.queue.jobsQueue <- job
-				d.queue.metrics.IncrementJobsQueueCount()
+
+				select {
+				case d.queue.jobsQueue <- job:
+					d.queue.metrics.IncrementJobsQueueCount()
+				default:
+					fmt.Println("⚠️ jobsQueue is full, skipping task delivery")
+					err := d.queue.PushToHeap(task.(Task))
+					if err != nil {
+						fmt.Printf("❌ Error re-queuing task %d: %v\n", task.(Task).ID, err)
+					} else {
+						fmt.Printf("🔄 Task %d re-queued to the heap\n", task.(Task).ID)
+					}
+					break
+				}
 			}
 		}
 	}
@@ -63,7 +75,7 @@ func (d *Dispatcher) Start(ctx context.Context) {
 	fmt.Println("🟢 Starting dispatcher with worker pool...")
 
 	// Spawn workers
-	for i := 0; i < d.numWorkers; i++ {
+	for i := range d.numWorkers {
 		worker := NewWorker(i, d.metrics, 5)
 		d.workerPool = append(d.workerPool, worker)
 
@@ -91,23 +103,32 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 			fmt.Println("🔴 Dispatcher context canceled, stopping dispatching")
 			return
 		case job := <-d.queue.jobsQueue:
-			go func(job Job) {
-				worker := d.findAvailableWorker()
-				if worker != nil {
-
-					select {
-					case worker.JobChannel <- job:
-						fmt.Printf("📤 Job %d dispatched to worker %d\n", job.task.ID, worker.id)
-					case <-time.After(500 * time.Millisecond):
-						//handle timeout
-						fmt.Printf("⚠️ Job %d dispatch to worker %d timed out\n", job.task.ID, worker.id)
-						d.queue.PushToHeap(job.task) // Requeue the job
-					}
-				} else {
-					fmt.Println("⚠️ No available workers to process the job")
-					d.queue.PushToHeap(job.task) // Requeue the job
+			worker := d.findAvailableWorker()
+			if worker == nil {
+				fmt.Println("⚠️ No available workers to process the job")
+				err := d.queue.PushToHeap(job.task) // Requeue the job
+				if err != nil {
+					fmt.Printf("❌ Error re-queuing job %d: %v\n", job.task.ID, err)
 				}
-			}(job)
+				continue
+			}
+
+			go func(job Job, w *Worker) {
+				select {
+				case worker.JobChannel <- job:
+					fmt.Printf("📤 Job %d dispatched to worker %d\n", job.task.ID, worker.id)
+					w.IncrementJobCount()
+				case <-time.After(500 * time.Millisecond):
+					//handle timeout
+					fmt.Printf("⚠️ Job %d dispatch to worker %d timed out\n", job.task.ID, worker.id)
+					err := d.queue.PushToHeap(job.task) // Requeue the job
+					if err != nil {
+						fmt.Printf("❌ Error re-queuing job %d: %v\n", job.task.ID, err)
+					} else {
+						fmt.Printf("🔄 Job %d re-queued to the heap\n", job.task.ID)
+					}
+				}
+			}(job, worker)
 		}
 	}
 }
@@ -123,7 +144,8 @@ func (d *Dispatcher) findAvailableWorker() *Worker {
 
 func (d *Dispatcher) Stop() {
 	fmt.Println("🔴 Shutting down dispatcher...")
-	d.stopCh <- struct{}{}
+	close(d.stopCh)
+
 	fmt.Println("⏳ Waiting for all workers to complete...")
 }
 

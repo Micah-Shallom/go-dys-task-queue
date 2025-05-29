@@ -12,30 +12,19 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	//simulate task generation
-	dataStore := generateData()
+	taskStream := make(chan Task, 1000)
 
 	//create fixed size worker pool with 5 workers
 	dispatcher := NewDispatcher(10)
-	dispatcher.Start(ctx)
+	go TaskFeeder(ctx, taskStream)
 
-	go Producer(dataStore, dispatcher)
+	dispatcher.Start(ctx)
+	go Producer(ctx, taskStream, dispatcher)
 
 	//metrics reporting
-	// go func() {
-	// 	ticker := time.NewTicker(3 * time.Second)
-	// 	defer ticker.Stop()
+	setupMetricsReporting(ctx, dispatcher)
 
-	// 	for {
-	// 		select {
-	// 		case <-ctx.Done():
-	// 			return
-	// 		default:
-	// 			fmt.Println("📊 " + dispatcher.metrics.Report())
-	// 		}
-	// 	}
-	// }()
-
+	
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
