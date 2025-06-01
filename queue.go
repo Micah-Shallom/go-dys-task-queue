@@ -18,7 +18,7 @@ type Job struct {
 
 type PriorityJobQueue struct {
 	taskHeap      priorityHeap //handles priority scheduling
-	jobsQueue     chan Job     //
+	jobsQueue     chan Job     //contains jobs to be processed
 	mu            sync.Mutex
 	notifyNewTask chan struct{}
 	metrics       *Metrics
@@ -26,7 +26,7 @@ type PriorityJobQueue struct {
 
 func NewPriorityJobQueue() *PriorityJobQueue {
 	pq := &PriorityJobQueue{
-		jobsQueue: make(chan Job, 1000),
+		jobsQueue: make(chan Job, 1000), // buffered channel to hold jobs
 		metrics:   NewMetrics(),
 		notifyNewTask: make(chan struct{}, 1), // buffered channel to avoid blocking
 		taskHeap: priorityHeap{

@@ -8,6 +8,20 @@ import (
 	"time"
 )
 
+type WorkerStatus int
+
+const (
+	WorkerStatusIdle WorkerStatus = iota
+	WorkerStatusBusy
+	WorkerStatusStopped
+)
+
+type WorkerHandle struct {
+	ID          int
+	Status      WorkerStatus
+	JobsChannel chan Job
+}
+
 type Worker struct {
 	id              int
 	JobChannel      chan Job
@@ -27,7 +41,7 @@ func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32) *Worker {
 		metrics:         metrics,
 		stopWorkerChan:  make(chan struct{}),
 		jobCount:        0,
-		idleTimeout:     10 * time.Second, // Set idle timeout to 5 seconds
+		idleTimeout:     20 * time.Second, // Set idle timeout to 10 seconds
 	}
 }
 
@@ -42,7 +56,7 @@ func (w *Worker) signalAvailability(d *Dispatcher) {
 
 	if w.GetJobCount() < w.maxJobPerWorker {
 		select {
-		case d.availableWorkers <- w:
+		case d.availableWorkers <- w.id:
 			//successfully signaled as available
 		case <-time.After(timeout):
 			//timeout, worker is busy

@@ -33,7 +33,7 @@ func main() {
 	fmt.Printf("Received signal: %s. Shutting down...\n", sig)
 
 	cancel()
-	dispatcher.Stop()
+	dispatcher.StopDispatch()
 	dispatcher.wg.Wait()
 	fmt.Println("Shutdown complete")
 }
