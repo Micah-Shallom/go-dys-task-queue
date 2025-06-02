@@ -12,11 +12,12 @@ import (
 
 // Metrics tracks task queue statistics.
 type Metrics struct {
-	heapSize       int64 // Size of the priority heap (taskqueue)
-	jobsQueueCount int64 // Number of jobs in the queue (jobqueue)
-	activeWorkers  int64 // Number of workers currently processing tasks
-	successfulJobs int64 // Number of successfully completed jobs
-	failedJobs     int64 // Number of failed jobs
+	heapSize       int64 
+	jobsQueueCount int64 
+	activeWorkers  int64 
+	successfulJobs int64
+	failedJobs     int64
+	totalWorkers   int64 
 	mu             sync.Mutex
 }
 
@@ -25,64 +26,101 @@ func NewMetrics() *Metrics {
 	return &Metrics{}
 }
 
-// IncrementHeapSize increments the heap size.
+// Heap size operations
+// func (m *Metrics) IncrementHeapSize() {
+// 	fmt.Println("🔔 Heap size incremented")
+// 	atomic.AddInt64(&m.heapSize, 1)
+// }
+
 func (m *Metrics) IncrementHeapSize() {
-	atomic.AddInt64(&m.heapSize, 1)
+    atomic.AddInt64(&m.heapSize, 1)
 }
 
-// DecrementHeapSize decrements the heap size.
+
 func (m *Metrics) DecrementHeapSize() {
 	atomic.AddInt64(&m.heapSize, -1)
 }
 
-// IncrementJobsQueueCount increments the jobs queue count.
+func (m *Metrics) GetHeapSize() int64 {
+	return atomic.LoadInt64(&m.heapSize)
+}
+
+// Jobs queue operations
 func (m *Metrics) IncrementJobsQueueCount() {
 	atomic.AddInt64(&m.jobsQueueCount, 1)
 }
 
-// DecrementJobsQueueCount decrements the jobs queue count.
 func (m *Metrics) DecrementJobsQueueCount() {
 	atomic.AddInt64(&m.jobsQueueCount, -1)
 }
 
-// IncrementActiveWorkers increments the active workers count.
+func (m *Metrics) GetJobsQueueCount() int64 {
+	return atomic.LoadInt64(&m.jobsQueueCount)
+}
+
+// Worker tracking operations
+func (m *Metrics) IncrementTotalWorkers() {
+	atomic.AddInt64(&m.totalWorkers, 1)
+}
+
+func (m *Metrics) DecrementTotalWorkers() {
+	atomic.AddInt64(&m.totalWorkers, -1)
+}
+
+func (m *Metrics) GetTotalWorkers() int64 {
+	return atomic.LoadInt64(&m.totalWorkers)
+}
+
+// Active worker operations (workers currently processing jobs)
 func (m *Metrics) IncrementActiveWorkers() {
 	atomic.AddInt64(&m.activeWorkers, 1)
 }
 
-// DecrementActiveWorkers decrements the active workers count.
 func (m *Metrics) DecrementActiveWorkers() {
 	atomic.AddInt64(&m.activeWorkers, -1)
 }
 
-// RecordSuccess increments the successful jobs count.
+func (m *Metrics) GetActiveWorkers() int64 {
+	return atomic.LoadInt64(&m.activeWorkers)
+}
+
+// Job completion tracking
 func (m *Metrics) RecordSuccess() {
 	atomic.AddInt64(&m.successfulJobs, 1)
 }
 
-// RecordFailure increments the failed jobs count.
 func (m *Metrics) RecordFailure() {
 	atomic.AddInt64(&m.failedJobs, 1)
 }
 
-// In metrics.go
+func (m *Metrics) GetSuccessfulJobs() int64 {
+	return atomic.LoadInt64(&m.successfulJobs)
+}
+
+func (m *Metrics) GetFailedJobs() int64 {
+	return atomic.LoadInt64(&m.failedJobs)
+}
+
+// Report generates a formatted metrics string
 func (m *Metrics) Report() string {
-	// No need for lock here since we're using atomic operations
 	return fmt.Sprintf(
-		"Metrics | Jobs in Queue: %d | Active Workers: %d | Successful Jobs: %d | Failed Jobs: %d",
+		"Heap: %d | Jobs Queue: %d | Total Workers: %d | Active Workers: %d | Successful: %d | Failed: %d",
+		atomic.LoadInt64(&m.heapSize),
 		atomic.LoadInt64(&m.jobsQueueCount),
+		atomic.LoadInt64(&m.totalWorkers),
 		atomic.LoadInt64(&m.activeWorkers),
 		atomic.LoadInt64(&m.successfulJobs),
 		atomic.LoadInt64(&m.failedJobs),
 	)
 }
 
-// Add a snapshot method for cases where atomic consistency is needed
-func (m *Metrics) Snapshot() (jobsQueue, activeWorkers, successful, failed int64) {
+func (m *Metrics) Snapshot() (heapSize, jobsQueue, totalWorkers, activeWorkers, successful, failed int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	heapSize = atomic.LoadInt64(&m.heapSize)
 	jobsQueue = atomic.LoadInt64(&m.jobsQueueCount)
+	totalWorkers = atomic.LoadInt64(&m.totalWorkers)
 	activeWorkers = atomic.LoadInt64(&m.activeWorkers)
 	successful = atomic.LoadInt64(&m.successfulJobs)
 	failed = atomic.LoadInt64(&m.failedJobs)
@@ -107,12 +145,14 @@ func (m *Metrics) WriteToLog(logDir string) error {
 	defer f.Close()
 
 	// Get metrics snapshot
-	jobsQueue, activeWorkers, successful, failed := m.Snapshot()
+	heapSize, jobsQueue, totalWorkers, activeWorkers, successful, failed := m.Snapshot()
 
 	// Format log entry with timestamp
-	logEntry := fmt.Sprintf("[%s] Queue: %d, Workers: %d, Success: %d, Failed: %d\n",
+	logEntry := fmt.Sprintf("[%s] Heap: %d, Queue: %d, Total Workers: %d, Active: %d, Success: %d, Failed: %d\n",
 		time.Now().Format("15:04:05"),
+		heapSize,
 		jobsQueue,
+		totalWorkers,
 		activeWorkers,
 		successful,
 		failed,
@@ -125,24 +165,26 @@ func (m *Metrics) WriteToLog(logDir string) error {
 	return nil
 }
 
-// Modify setupMetricsReporting to include file logging
+// setupMetricsReporting runs in a separate goroutine to report metrics periodically
 func setupMetricsReporting(ctx context.Context, dispatcher *Dispatcher) {
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
 
-	logDir := "logs"
+		logDir := "logs"
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			fmt.Println("📊 " + dispatcher.metrics.Report())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				fmt.Println("📊 " + dispatcher.metrics.Report())
 
-			// Write metrics to log file
-			if err := dispatcher.metrics.WriteToLog(logDir); err != nil {
-				fmt.Printf("Error writing metrics to log: %v\n", err)
+				// Write metrics to log file
+				if err := dispatcher.metrics.WriteToLog(logDir); err != nil {
+					fmt.Printf("Error writing metrics to log: %v\n", err)
+				}
 			}
 		}
-	}
+	}()
 }

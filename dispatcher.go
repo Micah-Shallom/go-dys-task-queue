@@ -59,6 +59,7 @@ func (d *Dispatcher) AddWorker(ctx context.Context) int {
 
 	worker := NewWorker(workerID, d.metrics, 5)
 	d.workers[workerID] = worker
+	d.metrics.IncrementTotalWorkers()
 
 	d.wg.Add(1)
 	go worker.Start(ctx, d)
@@ -78,6 +79,7 @@ func (d *Dispatcher) RemoveWorker(workerID int) error {
 
 	worker.Stop()
 	delete(d.workers, workerID)
+	d.metrics.DecrementTotalWorkers()
 
 	return nil
 }
@@ -97,18 +99,20 @@ func (d *Dispatcher) receiveTasksFromHeap(ctx context.Context) {
 					break // Exit inner loop if no more tasks
 				}
 
+				// time.Sleep(3 * time.Second) //i want to see the accumulation of tasks in the heap
+
 				task := d.queue.taskHeap.Pop()
-				d.queue.metrics.DecrementHeapSize()
+				d.metrics.DecrementHeapSize()
 				d.queue.mu.Unlock()
 
 				job := Job{task: task.(Task)}
 
 				select {
 				case d.queue.jobsQueue <- job:
-					d.queue.metrics.IncrementJobsQueueCount()
+					d.metrics.IncrementJobsQueueCount()
 				default:
 					fmt.Println("⚠️ jobsQueue is full, skipping task delivery")
-					err := d.queue.PushToHeap(task.(Task))
+					err := d.queue.PushToHeap(task.(Task), d)
 					if err != nil {
 						fmt.Printf("❌ Error re-queuing task %d: %v\n", task.(Task).ID, err)
 					} else {
@@ -148,11 +152,17 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 		case <-ctx.Done():
 			fmt.Println("🔴 Dispatcher context canceled, stopping dispatching")
 			return
+
+			
 		case job := <-d.queue.jobsQueue:
+			// time.Sleep(10 * time.Second) // Simulate some delay for demonstration
+
+			
+			d.metrics.DecrementJobsQueueCount()
 			workerID := d.findAvailableWorker()
 			if workerID == -1 {
 				fmt.Println("⚠️ No available workers to process the job")
-				err := d.queue.PushToHeap(job.task) // Requeue the job
+				err := d.queue.PushToHeap(job.task, d) // Requeue the job
 				if err != nil {
 					fmt.Printf("❌ Error re-queuing job %d: %v\n", job.task.ID, err)
 				}
@@ -162,7 +172,7 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 			worker, exists := d.GetWorkerByID(workerID)
 			if !exists {
 				fmt.Printf("❌ Worker %d not found, re-queuing job %d\n", workerID, job.task.ID)
-				err := d.queue.PushToHeap(job.task)
+				err := d.queue.PushToHeap(job.task, d)
 				if err != nil {
 					fmt.Printf("❌ Error re-queuing job %d: %v\n", job.task.ID, err)
 				}
@@ -177,7 +187,7 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 				case <-time.After(500 * time.Millisecond):
 					//handle timeout
 					fmt.Printf("⚠️ Job %d dispatch to worker %d timed out\n", job.task.ID, worker.id)
-					err := d.queue.PushToHeap(job.task) // Requeue the job
+					err := d.queue.PushToHeap(job.task, d) // Requeue the job
 					if err != nil {
 						fmt.Printf("❌ Error re-queuing job %d: %v\n", job.task.ID, err)
 					} else {
@@ -220,7 +230,6 @@ func (d *Dispatcher) RemoveWorkerByID(workerID int) error {
 	fmt.Printf("👷 Worker %d removed from the pool\n", workerID)
 	return nil
 }
-
 
 func (d *Dispatcher) StopWorker(worker *Worker) error {
 	return d.RemoveWorkerByID(worker.id)

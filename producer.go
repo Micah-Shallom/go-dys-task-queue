@@ -52,8 +52,7 @@ func Producer(ctx context.Context, taskStream <-chan Task, d *Dispatcher) {
 				fmt.Println("🛑 Task stream closed, producer exiting")
 				return
 			}
-			fmt.Println(task)
-			d.queue.PushToHeap(task)
+			d.queue.PushToHeap(task, d)
 		}
 	}
 }

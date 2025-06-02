@@ -107,7 +107,6 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 			}
 			w.DecrementJobCount()
 			w.signalAvailability(d)
-			w.metrics.DecrementJobsQueueCount()
 		}
 	}
 }
@@ -115,7 +114,7 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 func (w *Worker) processTask(job Job, startTime time.Time) error {
 
 	fmt.Printf("Worker %d: Processing task %d (Priority: %d, Name: %s)\n", w.id, job.task.ID, job.task.Priority, job.task.Name)
-	time.Sleep(2 * time.Second) //simulate work
+	time.Sleep(time.Duration(rand.Intn(5000)+500) * time.Millisecond) // Simulate processing time
 
 	// Simulate failure for ~20% of tasks
 	if rand.Float32() < 0.2 {

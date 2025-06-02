@@ -15,7 +15,7 @@ func main() {
 	taskStream := make(chan Task, 1000)
 
 	//create fixed size worker pool with 5 workers
-	dispatcher := NewDispatcher(10)
+	dispatcher := NewDispatcher(2)
 	go TaskFeeder(ctx, taskStream)
 
 	dispatcher.Start(ctx)

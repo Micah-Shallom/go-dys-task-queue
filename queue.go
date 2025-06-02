@@ -21,16 +21,14 @@ type PriorityJobQueue struct {
 	jobsQueue     chan Job     //contains jobs to be processed
 	mu            sync.Mutex
 	notifyNewTask chan struct{}
-	metrics       *Metrics
 }
 
 func NewPriorityJobQueue() *PriorityJobQueue {
 	pq := &PriorityJobQueue{
-		jobsQueue: make(chan Job, 1000), // buffered channel to hold jobs
-		metrics:   NewMetrics(),
-		notifyNewTask: make(chan struct{}, 1), // buffered channel to avoid blocking
+		jobsQueue:     make(chan Job, 1000),
+		notifyNewTask: make(chan struct{}, 1),
 		taskHeap: priorityHeap{
-			tasks: make([]Task, 0),
+			tasks:  make([]Task, 0),
 			closed: false,
 		},
 	}
@@ -40,7 +38,7 @@ func NewPriorityJobQueue() *PriorityJobQueue {
 	return pq
 }
 
-func (pq *PriorityJobQueue) PushToHeap(task Task) error {
+func (pq *PriorityJobQueue) PushToHeap(task Task, d *Dispatcher) error {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
@@ -49,6 +47,7 @@ func (pq *PriorityJobQueue) PushToHeap(task Task) error {
 	}
 
 	heap.Push(&pq.taskHeap, task)
+	d.metrics.IncrementHeapSize()
 
 	//signal the worker pool that a new task is available
 	select {
@@ -57,31 +56,30 @@ func (pq *PriorityJobQueue) PushToHeap(task Task) error {
 		// non-blocking send
 	}
 
-	pq.metrics.IncrementHeapSize()
 	return nil
 }
 
-func (pq *PriorityJobQueue) PopFromJobQueue() (Job, bool) {
+func (pq *PriorityJobQueue) PopFromJobQueue(d *Dispatcher) (Job, bool) {
 	task, ok := <-pq.jobsQueue
 	if ok {
-		pq.metrics.DecrementJobsQueueCount()
+		d.metrics.DecrementJobsQueueCount()
 	}
 	return Job{task: task.task}, ok
 }
 
 func (pq *PriorityJobQueue) Close() {
-    pq.mu.Lock()
-    defer pq.mu.Unlock()
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
 
-    // Mark the task heap as closed
-    pq.taskHeap.closed = true
+	// Mark the task heap as closed
+	pq.taskHeap.closed = true
 
-    // Close channels
-    close(pq.jobsQueue)
-    close(pq.notifyNewTask)
+	// Close channels
+	close(pq.jobsQueue)
+	close(pq.notifyNewTask)
 
-    // Clear the task heap
-    pq.taskHeap.tasks = nil
+	// Clear the task heap
+	pq.taskHeap.tasks = nil
 }
 
 // implement the heap interface
@@ -105,21 +103,3 @@ func (h *priorityHeap) Pop() interface{} {
 	h.tasks = old[0 : n-1]
 	return x
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
