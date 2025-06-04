@@ -3,32 +3,35 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
 
 // dispatcher implements a worker pool pattern
 type Dispatcher struct {
-	queue            *PriorityJobQueue //jobs are read from this queue into the heap for priority processing
-	stopCh           chan struct{}     //channel to signal all worker to stop
-	availableWorkers chan int
-	workers          map[int]*Worker // Map of worker ID to Worker
-	numWorkers       int
-	wg               sync.WaitGroup
-	disLock          sync.Mutex
-	metrics          *Metrics
-	nextWorkerID     int
+	queue             *PriorityJobQueue //jobs are read from this queue into the heap for priority processing
+	stopCh            chan struct{}     //channel to signal all worker to stop
+	idleTerminationCh chan int          //channel to signal worker termination when idle
+	availableWorkers  chan int
+	workers           map[int]*Worker // Map of worker ID to Worker
+	numWorkers        int
+	wg                sync.WaitGroup
+	disLock           sync.Mutex
+	metrics           *Metrics
+	nextWorkerID      int
 }
 
 func NewDispatcher(numWorkers int) *Dispatcher {
-	fmt.Println("🚀 Dispatcher initialized!")
+	slog.Info("🚀 Dispatcher initialized", "num workers", numWorkers)
 	return &Dispatcher{
 		queue:            NewPriorityJobQueue(),
 		numWorkers:       numWorkers,
 		metrics:          NewMetrics(),
 		availableWorkers: make(chan int, numWorkers), // Buffered channel to hold available workers
 		workers:          make(map[int]*Worker),
-		stopCh:           make(chan struct{}), //general stopChan to signal all workers to stop
+		stopCh:           make(chan struct{}),
+		idleTerminationCh: make(chan int, numWorkers),
 	}
 }
 
@@ -57,30 +60,24 @@ func (d *Dispatcher) AddWorker(ctx context.Context) int {
 	workerID := d.nextWorkerID
 	d.nextWorkerID++
 
-	worker := NewWorker(workerID, d.metrics, 5)
+	worker := NewWorker(workerID, d.metrics, 5, d)
 	d.workers[workerID] = worker
 	d.metrics.IncrementTotalWorkers()
 
 	d.wg.Add(1)
 	go worker.Start(ctx, d)
 
-	fmt.Printf("👷 Worker %d added to the pool\n", workerID)
+	slog.Info("🧑‍💻 Worker added to the pool", "worker_id", workerID)
 	return workerID
 }
 
-func (d *Dispatcher) RemoveWorker(workerID int) error {
-	d.disLock.Lock()
-	defer d.disLock.Unlock()
-
-	worker, exists := d.workers[workerID]
-	if !exists {
-		return fmt.Errorf("worker %d not found", workerID)
+func (d *Dispatcher) RemoveWorkerByID(workerID int) error {
+	_, err := d.removeWorkerInternal(workerID, true) // lockNeeded is true
+	if err != nil {
+		slog.Error("Error removing worker by ID", "worker_id", workerID, "error", err)
+		return err
 	}
-
-	worker.Stop()
-	delete(d.workers, workerID)
-	d.metrics.DecrementTotalWorkers()
-
+	slog.Info("👷 Worker removed from the pool by explicit request", "worker_id", workerID)
 	return nil
 }
 
@@ -89,7 +86,7 @@ func (d *Dispatcher) receiveTasksFromHeap(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("🔴 Dispatcher context canceled, stopping task reception")
+			slog.Info("🛑 Dispatcher context canceled, stopping task reception")
 			return
 		case <-d.queue.notifyNewTask: // Block until a new task is signaled
 			for {
@@ -111,12 +108,12 @@ func (d *Dispatcher) receiveTasksFromHeap(ctx context.Context) {
 				case d.queue.jobsQueue <- job:
 					d.metrics.IncrementJobsQueueCount()
 				default:
-					fmt.Println("⚠️ jobsQueue is full, skipping task delivery")
+					slog.Warn("⚠️ jobsQueue is full, skipping task delivery")
 					err := d.queue.PushToHeap(task.(Task), d)
 					if err != nil {
-						fmt.Printf("❌ Error re-queuing task %d: %v\n", task.(Task).ID, err)
+						slog.Error("❗ Error re-queuing task", "task_id", task.(Task).ID, "err", err)
 					} else {
-						fmt.Printf("🔄 Task %d re-queued to the heap\n", task.(Task).ID)
+						slog.Info("🔄 Task re-queued to the heap", "task_id", task.(Task).ID)
 					}
 					break
 				}
@@ -126,7 +123,7 @@ func (d *Dispatcher) receiveTasksFromHeap(ctx context.Context) {
 }
 
 func (d *Dispatcher) Start(ctx context.Context) {
-	fmt.Println("🟢 Starting dispatcher with worker pool...")
+	slog.Info("🏁 Starting dispatcher with worker pool...")
 
 	// Spawn workers
 	for i := range d.numWorkers {
@@ -137,44 +134,86 @@ func (d *Dispatcher) Start(ctx context.Context) {
 	go d.receiveTasksFromHeap(ctx)
 
 	go d.dispatch(ctx)
+	go d.handleIdleTermination(ctx)
 
 	go func() {
 		<-ctx.Done()
 		d.StopDispatch()
 	}()
 
-	fmt.Printf("✅ Worker pool ready with %d workers\n", d.numWorkers)
+	slog.Info("✅ Worker pool ready", "num_workers", d.numWorkers)
 }
+
+func (d *Dispatcher) handleIdleTermination(ctx context.Context) {
+	slog.Info("🕰️ Starting idle termination handler...")
+	defer slog.Info("🛑 Idle termination handler stopped")
+
+	for {
+		select{
+		case <-ctx.Done():
+			slog.Info("🛑 Idle termination context canceled, stopping handler")
+			return
+		case workerID := <-d.idleTerminationCh:
+			slog.Info("🗑️ Worker idle for too long, terminating", "worker_id", workerID)
+
+			removedWorker , err := d.removeWorkerInternal(workerID, true)
+			if err != nil {
+				slog.Warn("❗ Error removing worker", "worker_id", workerID, "err", err)
+				continue
+			}
+
+			slog.Info("🗑️ Worker removed from the pool", "worker_id", removedWorker.id)
+		}
+	}
+}
+
+func (d *Dispatcher) removeWorkerInternal(workerID int, lock bool) (*Worker, error) {
+	if lock {
+		d.disLock.Lock()
+		defer d.disLock.Unlock()
+	}
+
+	worker, exists := d.workers[workerID]
+	if !exists {
+		return nil, fmt.Errorf("worker %d not found for internal removal", workerID)
+	}
+
+	slog.Info("Stopping worker as part of internal removal", "worker_id", workerID)
+	worker.Stop(d) 
+	delete(d.workers, workerID)
+	d.metrics.DecrementTotalWorkers()
+
+	return worker, nil
+}
+
 
 func (d *Dispatcher) dispatch(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("🔴 Dispatcher context canceled, stopping dispatching")
+			slog.Info("🛑 Dispatcher context canceled, stopping dispatching")
 			return
 
-			
 		case job := <-d.queue.jobsQueue:
 			// time.Sleep(10 * time.Second) // Simulate some delay for demonstration
 
-			
 			d.metrics.DecrementJobsQueueCount()
 			workerID := d.findAvailableWorker()
 			if workerID == -1 {
-				fmt.Println("⚠️ No available workers to process the job")
+				slog.Warn("⚠️ No available workers to process the job")
 				err := d.queue.PushToHeap(job.task, d) // Requeue the job
 				if err != nil {
-					fmt.Printf("❌ Error re-queuing job %d: %v\n", job.task.ID, err)
+					slog.Error("❗ Error re-queuing job", "job_id", job.task.ID, "err", err)
 				}
 				continue
 			}
 
 			worker, exists := d.GetWorkerByID(workerID)
 			if !exists {
-				fmt.Printf("❌ Worker %d not found, re-queuing job %d\n", workerID, job.task.ID)
+				slog.Error("❌ Worker not found, re-queuing job", "worker_id", workerID, "job_id", job.task.ID)
 				err := d.queue.PushToHeap(job.task, d)
 				if err != nil {
-					fmt.Printf("❌ Error re-queuing job %d: %v\n", job.task.ID, err)
+					slog.Error("❗ Error re-queuing job", "job_id", job.task.ID, "err", err)
 				}
 				continue
 			}
@@ -182,16 +221,16 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 			go func(job Job, w *Worker, wID int) {
 				select {
 				case worker.JobChannel <- job:
-					fmt.Printf("📤 Job %d dispatched to worker %d\n", job.task.ID, worker.id)
+					slog.Info("📦 Job dispatched to worker", "job_id", job.task.ID, "worker_id", worker.id)
 					w.IncrementJobCount()
 				case <-time.After(500 * time.Millisecond):
 					//handle timeout
-					fmt.Printf("⚠️ Job %d dispatch to worker %d timed out\n", job.task.ID, worker.id)
+					slog.Warn("⏰ Job dispatch to worker timed out", "job_id", job.task.ID, "worker_id", worker.id)
 					err := d.queue.PushToHeap(job.task, d) // Requeue the job
 					if err != nil {
-						fmt.Printf("❌ Error re-queuing job %d: %v\n", job.task.ID, err)
+						slog.Error("❗ Error re-queuing job", "job_id", job.task.ID, "err", err)
 					} else {
-						fmt.Printf("🔄 Job %d re-queued to the heap\n", job.task.ID)
+						slog.Info("🔄 Job re-queued to the heap", "job_id", job.task.ID)
 					}
 				}
 			}(job, worker, workerID)
@@ -209,26 +248,10 @@ func (d *Dispatcher) findAvailableWorker() int {
 }
 
 func (d *Dispatcher) StopDispatch() {
-	fmt.Println("🔴 Shutting down dispatcher...")
+	slog.Info("🛑 Shutting down dispatcher...")
 	close(d.stopCh)
 
-	fmt.Println("⏳ Waiting for all workers to complete...")
-}
-
-func (d *Dispatcher) RemoveWorkerByID(workerID int) error {
-	d.disLock.Lock()
-	defer d.disLock.Unlock()
-
-	worker, exists := d.workers[workerID]
-	if !exists {
-		return fmt.Errorf("worker %d not found", workerID)
-	}
-
-	worker.Stop()
-	delete(d.workers, workerID)
-
-	fmt.Printf("👷 Worker %d removed from the pool\n", workerID)
-	return nil
+	slog.Info("⏳ Waiting for all workers to complete...")
 }
 
 func (d *Dispatcher) StopWorker(worker *Worker) error {
@@ -237,5 +260,5 @@ func (d *Dispatcher) StopWorker(worker *Worker) error {
 
 func (d *Dispatcher) Wait() {
 	d.wg.Wait()
-	fmt.Println("✅ All workers have completed, dispatcher shutdown complete!")
+	slog.Info("🎉 All workers have completed, dispatcher shutdown complete!")
 }

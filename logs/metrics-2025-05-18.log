@@ -1,7 +1,0 @@
-[17:47:25] Queue: -10, Workers: 0, Success: 7, Failed: 3
-[17:47:28] Queue: -21, Workers: 0, Success: 16, Failed: 6
-[17:47:31] Queue: -40, Workers: 0, Success: 32, Failed: 8
-[17:47:34] Queue: -50, Workers: 0, Success: 40, Failed: 10
-[17:47:37] Queue: -66, Workers: 0, Success: 55, Failed: 13
-[17:47:40] Queue: -80, Workers: 0, Success: 66, Failed: 14
-[17:47:43] Queue: -91, Workers: 0, Success: 77, Failed: 15

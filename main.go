@@ -3,19 +3,23 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	taskStream := make(chan Task, 1000)
 
 	//create fixed size worker pool with 5 workers
-	dispatcher := NewDispatcher(2)
+	dispatcher := NewDispatcher(300)
 	go TaskFeeder(ctx, taskStream)
 
 	dispatcher.Start(ctx)
@@ -24,7 +28,6 @@ func main() {
 	//metrics reporting
 	setupMetricsReporting(ctx, dispatcher)
 
-	
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -34,6 +37,6 @@ func main() {
 
 	cancel()
 	dispatcher.StopDispatch()
-	dispatcher.wg.Wait()
+	dispatcher.Wait()
 	fmt.Println("Shutdown complete")
 }

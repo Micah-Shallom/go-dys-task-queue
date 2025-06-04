@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"time"
 )
@@ -24,8 +25,9 @@ func TaskFeeder(ctx context.Context, taskstream chan<- Task) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("🛑 TaskFeeder shutting down")
+			slog.Info("🛑 TaskFeeder shutting down")
 			close(taskstream)
+			return
 		default:
 			priority := randomPriority()
 			task := Task{
@@ -41,15 +43,16 @@ func TaskFeeder(ctx context.Context, taskstream chan<- Task) {
 }
 
 func Producer(ctx context.Context, taskStream <-chan Task, d *Dispatcher) {
-
+	slog.Info("👂 Starting Producer to listen on taskStream and push to dispatcher's heap...")
+	defer slog.Info("🛑 Producer shutting down.")
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("🛑 Producer shutting down")
+			slog.Info("🛑 Producer shutting down")
 			return
 		case task, ok := <-taskStream:
 			if !ok {
-				fmt.Println("🛑 Task stream closed, producer exiting")
+				slog.Info("🛑 Task stream closed, producer exiting")
 				return
 			}
 			d.queue.PushToHeap(task, d)

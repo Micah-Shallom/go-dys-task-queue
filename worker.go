@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"sync/atomic"
 	"time"
@@ -23,32 +24,47 @@ type WorkerHandle struct {
 }
 
 type Worker struct {
-	id              int
-	JobChannel      chan Job
-	maxJobPerWorker int32
-	metrics         *Metrics
-	stopWorkerChan  chan struct{} //channel to signal worker is busy
-	jobCount        int32         //tracks the number of jobs in the worker job channel
-	idleSince       atomic.Value
-	idleTimeout     time.Duration
+	id                int
+	JobChannel        chan Job
+	maxJobPerWorker   int32
+	metrics           *Metrics
+	stopWorkerChan    chan struct{} //channel to signal worker is busy
+	idleTerminationCh chan<- int    //channel to signal worker termination when idle
+	jobCount          int32         //tracks the number of jobs in the worker job channel
+	idleSince         atomic.Value
+	idleTimeout       time.Duration
 }
 
-func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32) *Worker {
+func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32, d *Dispatcher) *Worker {
 	return &Worker{
-		id:              id,
-		maxJobPerWorker: maxJobPerWorker,
-		JobChannel:      make(chan Job, maxJobPerWorker),
-		metrics:         metrics,
-		stopWorkerChan:  make(chan struct{}),
-		jobCount:        0,
-		idleTimeout:     20 * time.Second, // Set idle timeout to 10 seconds
+		id:                id,
+		maxJobPerWorker:   maxJobPerWorker,
+		JobChannel:        make(chan Job, maxJobPerWorker),
+		metrics:           metrics,
+		stopWorkerChan:    make(chan struct{}),
+		idleTerminationCh: d.idleTerminationCh,
+		jobCount:          0,
+		idleTimeout:       2 * time.Second, // Set idle timeout to 10 seconds
 	}
 }
 
-func (w *Worker) Stop() {
-	fmt.Printf("👷 Worker %d: Stopping\n", w.id)
+func (w *Worker) Stop(d *Dispatcher) {
+	slog.Info("👷 Worker stopping", "worker_id", w.id)
 	close(w.JobChannel)
-	w.metrics.DecrementActiveWorkers()
+
+	slog.Info("👷 Worker draining JobChannel and re-queueing tasks...", "worker_id", w.id)
+	for job := range w.JobChannel {
+		slog.Info("👷 Worker re-queueing task", "worker_id", w.id, "task_id", job.task.ID, "priority", job.task.Priority)
+		if d == nil {
+			slog.Error("👷 Worker failed to re-queue task", "worker_id", w.id, "task_id", job.task.ID, "error", "dispatcher is nil")
+			continue
+		}
+		if err := d.queue.PushToHeap(job.task, nil); err != nil {
+			slog.Error("👷 Worker failed to re-queue task", "worker_id", w.id, "task_id", job.task.ID, "error", err)
+		}
+	}
+
+	slog.Info("👷 Worker finished draining JobChannel", "worker_id", w.id)
 }
 
 func (w *Worker) signalAvailability(d *Dispatcher) {
@@ -60,7 +76,7 @@ func (w *Worker) signalAvailability(d *Dispatcher) {
 			//successfully signaled as available
 		case <-time.After(timeout):
 			//timeout, worker is busy
-			fmt.Printf("👷 Worker %d: No available workers, busy processing tasks\n", w.id)
+			slog.Info("👷 Worker busy processing tasks", "worker_id", w.id)
 			return
 		}
 	}
@@ -68,7 +84,7 @@ func (w *Worker) signalAvailability(d *Dispatcher) {
 
 func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 	defer d.wg.Done()
-	fmt.Printf("👷 Worker %d: Started and ready to process tasks\n", w.id)
+	slog.Info("👷 Worker started and ready to process tasks", "worker_id", w.id)
 
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
@@ -78,14 +94,14 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("👷 Worker %d: Context canceled, stopping\n", w.id)
+			slog.Info("👷 Worker context canceled, stopping", "worker_id", w.id)
 			return
 		case <-d.stopCh: //general signal from dispatcher
-			fmt.Printf("👷 Worker %d: Received stop signal, stopping\n", w.id)
+			slog.Info("👷 Worker received stop signal, stopping", "worker_id", w.id)
 			w.metrics.DecrementActiveWorkers()
 			return
 		case <-w.stopWorkerChan: //signal to terminate worker
-			fmt.Printf("👷 Worker %d: Received stop worker signal, stopping\n", w.id)
+			slog.Info("👷 Worker received stop worker signal, stopping", "worker_id", w.id)
 			w.metrics.DecrementActiveWorkers()
 			return
 
@@ -94,16 +110,30 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 			w.signalAvailability(d)
 
 			if w.idleTimeout > 0 && w.GetJobCount() == 0 && w.IsIdleLongEnough() {
-				fmt.Printf("👷 Worker %d: Idle for too long, stopping\n", w.id)
-				w.Stop()
+				slog.Info("👷 Worker idle for too long, stopping", "worker_id", w.id)
+
+				select {
+				case w.idleTerminationCh <- w.id:
+					slog.Info("👷 Worker successfully notified dispatcher of idle termination", "worker_id", w.id)
+				case <-time.After(2 * time.Second): // Timeout for sending notification
+					slog.Warn("⚠️ Worker timeout notifying dispatcher of idle termination. Proceeding with Stop().", "worker_id", w.id)
+				case <-ctx.Done(): // Ensure worker respects context cancellation during notification
+					slog.Info("Context cancelled while notifying dispatcher of idle termination", "worker_id", w.id)
+				}
+
+				w.Stop(d)
 				return
 			}
 
-		case job := <-w.JobChannel:
+		case job, ok := <-w.JobChannel:
+			if !ok {
+				slog.Info("👷 Worker JobChannel closed, stopping", "worker_id", w.id)
+			}
+			
 			err := w.processTask(job, time.Now())
 			if err != nil {
 				w.metrics.RecordFailure()
-				fmt.Printf("🔴 Worker %d: Failed to process task %d\n", w.id, job.task.ID)
+				slog.Error("🔴 Worker failed to process task", "worker_id", w.id, "task_id", job.task.ID)
 			}
 			w.DecrementJobCount()
 			w.signalAvailability(d)
@@ -112,8 +142,7 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 }
 
 func (w *Worker) processTask(job Job, startTime time.Time) error {
-
-	fmt.Printf("Worker %d: Processing task %d (Priority: %d, Name: %s)\n", w.id, job.task.ID, job.task.Priority, job.task.Name)
+	slog.Info("👷 Worker processing task", "worker_id", w.id, "task_id", job.task.ID, "priority", job.task.Priority, "name", job.task.Name)
 	time.Sleep(time.Duration(rand.Intn(5000)+500) * time.Millisecond) // Simulate processing time
 
 	// Simulate failure for ~20% of tasks
@@ -121,20 +150,16 @@ func (w *Worker) processTask(job Job, startTime time.Time) error {
 		return fmt.Errorf("simulated failure for task %d", job.task.ID)
 	}
 
-	if job.task.Priority == 1 {
+	switch job.task.Priority {
+	case 1:
 		w.metrics.RecordSuccess()
-		fmt.Printf("🔴 Worker %d: Completed HIGH priority task %d in %v\n",
-			w.id, job.task.ID, time.Since(startTime))
-	} else if job.task.Priority == 2 {
-		// Medium priority tasks
+		slog.Info("🔴 Worker completed HIGH priority task", "worker_id", w.id, "task_id", job.task.ID, "duration", time.Since(startTime))
+	case 2:
 		w.metrics.RecordSuccess()
-		fmt.Printf("🟠 Worker %d: Completed MEDIUM priority task %d in %v\n",
-			w.id, job.task.ID, time.Since(startTime))
-	} else {
-		// Low priority tasks
+		slog.Info("🟠 Worker completed MEDIUM priority task", "worker_id", w.id, "task_id", job.task.ID, "duration", time.Since(startTime))
+	default:
 		w.metrics.RecordSuccess()
-		fmt.Printf("🟢 Worker %d: Completed LOW priority task %d in %v\n",
-			w.id, job.task.ID, time.Since(startTime))
+		slog.Info("🟢 Worker completed LOW priority task", "worker_id", w.id, "task_id", job.task.ID, "duration", time.Since(startTime))
 	}
 	return nil
 }
