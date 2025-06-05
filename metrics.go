@@ -12,12 +12,13 @@ import (
 
 // Metrics tracks task queue statistics.
 type Metrics struct {
-	heapSize       int64 
-	jobsQueueCount int64 
-	activeWorkers  int64 
+	totalTasks     int64 // Total number of tasks generated
+	heapSize       int64
+	jobsQueueCount int64
+	activeWorkers  int64
 	successfulJobs int64
 	failedJobs     int64
-	totalWorkers   int64 
+	totalWorkers   int64
 	mu             sync.Mutex
 }
 
@@ -32,10 +33,13 @@ func NewMetrics() *Metrics {
 // 	atomic.AddInt64(&m.heapSize, 1)
 // }
 
-func (m *Metrics) IncrementHeapSize() {
-    atomic.AddInt64(&m.heapSize, 1)
+func (m *Metrics) IncrementTotalTasks() {
+	atomic.AddInt64(&m.totalTasks, 1)
 }
 
+func (m *Metrics) IncrementHeapSize() {
+	atomic.AddInt64(&m.heapSize, 1)
+}
 
 func (m *Metrics) DecrementHeapSize() {
 	atomic.AddInt64(&m.heapSize, -1)
@@ -104,7 +108,8 @@ func (m *Metrics) GetFailedJobs() int64 {
 // Report generates a formatted metrics string
 func (m *Metrics) Report() string {
 	return fmt.Sprintf(
-		"Heap: %d | Jobs Queue: %d | Total Workers: %d | Active Workers: %d | Successful: %d | Failed: %d",
+		"Total-Tasks: %d | Heap: %d | Jobs Queue: %d | Total Workers: %d | Active Workers: %d | Successful: %d | Failed: %d",
+		atomic.LoadInt64(&m.totalTasks),
 		atomic.LoadInt64(&m.heapSize),
 		atomic.LoadInt64(&m.jobsQueueCount),
 		atomic.LoadInt64(&m.totalWorkers),
@@ -114,10 +119,11 @@ func (m *Metrics) Report() string {
 	)
 }
 
-func (m *Metrics) Snapshot() (heapSize, jobsQueue, totalWorkers, activeWorkers, successful, failed int64) {
+func (m *Metrics) Snapshot() (totaltasks, heapSize, jobsQueue, totalWorkers, activeWorkers, successful, failed int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	totaltasks = atomic.LoadInt64(&m.totalTasks)
 	heapSize = atomic.LoadInt64(&m.heapSize)
 	jobsQueue = atomic.LoadInt64(&m.jobsQueueCount)
 	totalWorkers = atomic.LoadInt64(&m.totalWorkers)
@@ -145,11 +151,12 @@ func (m *Metrics) WriteToLog(logDir string) error {
 	defer f.Close()
 
 	// Get metrics snapshot
-	heapSize, jobsQueue, totalWorkers, activeWorkers, successful, failed := m.Snapshot()
+	totaltasks, heapSize, jobsQueue, totalWorkers, activeWorkers, successful, failed := m.Snapshot()
 
 	// Format log entry with timestamp
-	logEntry := fmt.Sprintf("[%s] Heap: %d, Queue: %d, Total Workers: %d, Active: %d, Success: %d, Failed: %d\n",
+	logEntry := fmt.Sprintf("[%s] TotalTasks: %d, Heap: %d, Queue: %d, Total Workers: %d, Active: %d, Success: %d, Failed: %d\n",
 		time.Now().Format("15:04:05"),
+		totaltasks,
 		heapSize,
 		jobsQueue,
 		totalWorkers,

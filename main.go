@@ -20,7 +20,7 @@ func main() {
 
 	//create fixed size worker pool with 5 workers
 	dispatcher := NewDispatcher(300)
-	go TaskFeeder(ctx, taskStream)
+	go TaskFeeder(ctx, taskStream, dispatcher.metrics)
 
 	dispatcher.Start(ctx)
 	go Producer(ctx, taskStream, dispatcher)

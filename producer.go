@@ -20,7 +20,7 @@ func randomPriority() int {
 	}
 }
 
-func TaskFeeder(ctx context.Context, taskstream chan<- Task) {
+func TaskFeeder(ctx context.Context, taskstream chan<- Task, metrics *Metrics) {
 	id := 0
 	for {
 		select {
@@ -35,6 +35,8 @@ func TaskFeeder(ctx context.Context, taskstream chan<- Task) {
 				Priority: priority,
 				Name:     fmt.Sprintf("Task-%d", id),
 			}
+
+			metrics.IncrementTotalTasks()
 			taskstream <- task
 			id++
 			time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond) // simulate staggered arrival

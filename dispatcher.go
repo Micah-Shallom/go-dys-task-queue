@@ -13,24 +13,27 @@ type Dispatcher struct {
 	queue             *PriorityJobQueue //jobs are read from this queue into the heap for priority processing
 	stopCh            chan struct{}     //channel to signal all worker to stop
 	idleTerminationCh chan int          //channel to signal worker termination when idle
-	availableWorkers  chan int
-	workers           map[int]*Worker // Map of worker ID to Worker
+	workers           map[int]*Worker   // Map of worker ID to Worker
 	numWorkers        int
 	wg                sync.WaitGroup
 	disLock           sync.Mutex
+	setMU             sync.RWMutex
 	metrics           *Metrics
 	nextWorkerID      int
+	availableSet      map[int]bool // Set of available worker IDs
+	availableWorkers  chan int
 }
 
 func NewDispatcher(numWorkers int) *Dispatcher {
 	slog.Info("🚀 Dispatcher initialized", "num workers", numWorkers)
 	return &Dispatcher{
-		queue:            NewPriorityJobQueue(),
-		numWorkers:       numWorkers,
-		metrics:          NewMetrics(),
-		availableWorkers: make(chan int, numWorkers), // Buffered channel to hold available workers
-		workers:          make(map[int]*Worker),
-		stopCh:           make(chan struct{}),
+		queue:             NewPriorityJobQueue(),
+		numWorkers:        numWorkers,
+		metrics:           NewMetrics(),
+		availableWorkers:  make(chan int, numWorkers), // Buffered channel to hold available workers
+		availableSet:      make(map[int]bool),     // Set to track available workers
+		workers:           make(map[int]*Worker),
+		stopCh:            make(chan struct{}),
 		idleTerminationCh: make(chan int, numWorkers),
 	}
 }
@@ -109,7 +112,7 @@ func (d *Dispatcher) receiveTasksFromHeap(ctx context.Context) {
 					d.metrics.IncrementJobsQueueCount()
 				default:
 					slog.Warn("⚠️ jobsQueue is full, skipping task delivery")
-					err := d.queue.PushToHeap(task.(Task), d)
+					err := d.queue.PushToHeap(task.(Task), d) // requeue the task
 					if err != nil {
 						slog.Error("❗ Error re-queuing task", "task_id", task.(Task).ID, "err", err)
 					} else {
@@ -149,14 +152,14 @@ func (d *Dispatcher) handleIdleTermination(ctx context.Context) {
 	defer slog.Info("🛑 Idle termination handler stopped")
 
 	for {
-		select{
+		select {
 		case <-ctx.Done():
 			slog.Info("🛑 Idle termination context canceled, stopping handler")
 			return
 		case workerID := <-d.idleTerminationCh:
 			slog.Info("🗑️ Worker idle for too long, terminating", "worker_id", workerID)
 
-			removedWorker , err := d.removeWorkerInternal(workerID, true)
+			removedWorker, err := d.removeWorkerInternal(workerID, true)
 			if err != nil {
 				slog.Warn("❗ Error removing worker", "worker_id", workerID, "err", err)
 				continue
@@ -179,13 +182,12 @@ func (d *Dispatcher) removeWorkerInternal(workerID int, lock bool) (*Worker, err
 	}
 
 	slog.Info("Stopping worker as part of internal removal", "worker_id", workerID)
-	worker.Stop(d) 
+	worker.Stop(d)
 	delete(d.workers, workerID)
 	d.metrics.DecrementTotalWorkers()
 
 	return worker, nil
 }
-
 
 func (d *Dispatcher) dispatch(ctx context.Context) {
 	for {
@@ -205,6 +207,7 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 				if err != nil {
 					slog.Error("❗ Error re-queuing job", "job_id", job.task.ID, "err", err)
 				}
+				slog.Info("🔄 Job re-queued to the heap", "job_id", job.task.ID)
 				continue
 			}
 
@@ -221,7 +224,7 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 			go func(job Job, w *Worker, wID int) {
 				select {
 				case worker.JobChannel <- job:
-					slog.Info("📦 Job dispatched to worker", "job_id", job.task.ID, "worker_id", worker.id)
+					// slog.Info("📦 Job dispatched to worker", "job_id", job.task.ID, "worker_id", worker.id)
 					w.IncrementJobCount()
 				case <-time.After(500 * time.Millisecond):
 					//handle timeout
@@ -241,6 +244,9 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 func (d *Dispatcher) findAvailableWorker() int {
 	select {
 	case workerID := <-d.availableWorkers:
+		d.setMU.Lock()
+		delete(d.availableSet, workerID) // Remove from available set
+		d.setMU.Unlock()
 		return workerID
 	default:
 		return -1 // No available workers

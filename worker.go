@@ -68,18 +68,28 @@ func (w *Worker) Stop(d *Dispatcher) {
 }
 
 func (w *Worker) signalAvailability(d *Dispatcher) {
-	timeout := 5 * time.Second // Set a timeout for finding an available worker
+	d.setMU.Lock()
+	defer d.setMU.Unlock()
 
-	if w.GetJobCount() < w.maxJobPerWorker {
-		select {
-		case d.availableWorkers <- w.id:
-			//successfully signaled as available
-		case <-time.After(timeout):
-			//timeout, worker is busy
-			slog.Info("👷 Worker busy processing tasks", "worker_id", w.id)
-			return
-		}
+	//only signal availability if worker is not already at max job capacity
+	if w.GetJobCount() >= w.maxJobPerWorker {
+		return
 	}
+
+	if d.availableSet[w.id] {
+		return
+	}
+
+	select {
+	case d.availableWorkers <- w.id:
+		//successfully signaled as available
+		slog.Info("👷 Worker signaled availability", "worker_id", w.id, "current_jobs", w.GetJobCount())
+		d.availableSet[w.id] = true // Mark worker as available
+	default:
+		// availableWorkers channel is full, do nothing
+		slog.Debug("👷 Worker could not signal availability, channel full", "worker_id", w.id, "current_jobs", w.GetJobCount())
+	}
+
 }
 
 func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
@@ -121,7 +131,7 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 					slog.Info("Context cancelled while notifying dispatcher of idle termination", "worker_id", w.id)
 				}
 
-				w.Stop(d)
+				d.removeWorkerInternal(w.id, true)
 				return
 			}
 
@@ -129,12 +139,13 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 			if !ok {
 				slog.Info("👷 Worker JobChannel closed, stopping", "worker_id", w.id)
 			}
-			
+
 			err := w.processTask(job, time.Now())
 			if err != nil {
 				w.metrics.RecordFailure()
 				slog.Error("🔴 Worker failed to process task", "worker_id", w.id, "task_id", job.task.ID)
 			}
+
 			w.DecrementJobCount()
 			w.signalAvailability(d)
 		}
