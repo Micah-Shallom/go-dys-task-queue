@@ -173,14 +173,17 @@ func (w *Worker) processTask(job Job, startTime time.Time) error {
 }
 
 func (w *Worker) IncrementJobCount() {
-	atomic.AddInt32(&w.jobCount, 1)
-
+	count := atomic.AddInt32(&w.jobCount, 1)
+	if count == 1 {
+		w.metrics.IncrementActiveWorkers()
+	}
 	w.idleSince.Store(time.Time{}) // Reset idle time
 }
 
 func (w *Worker) DecrementJobCount() {
 	count := atomic.AddInt32(&w.jobCount, -1)
 	if count == 0 {
+		w.metrics.DecrementActiveWorkers()
 		w.idleSince.Store(time.Now())
 	}
 }

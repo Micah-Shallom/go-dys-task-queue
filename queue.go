@@ -25,7 +25,7 @@ type PriorityJobQueue struct {
 
 func NewPriorityJobQueue() *PriorityJobQueue {
 	pq := &PriorityJobQueue{
-		jobsQueue:     make(chan Job, 1000),
+		jobsQueue:     make(chan Job, DefaultSizeConfig.JobQueueSize),
 		notifyNewTask: make(chan struct{}, 1),
 		taskHeap: priorityHeap{
 			tasks:  make([]Task, 0),

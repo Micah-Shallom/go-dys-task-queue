@@ -2,6 +2,18 @@ package main
 
 import "time"
 
+type Config struct {
+	TimeoutConfig TimeoutConfig
+	SizeConfig    SizeConfig
+	ScaleConfig   ScaleConfig
+}
+
+var NewConfig = Config{
+	TimeoutConfig: DefaultTimeouts,
+	SizeConfig:    DefaultSizeConfig,
+	ScaleConfig:   DefaultScaleConfig,
+}
+
 type TimeoutConfig struct {
 	WorkerIdleTimeout         time.Duration
 	WorkerStartupTimeout      time.Duration
@@ -12,12 +24,6 @@ type TimeoutConfig struct {
 	MetricsInterval           time.Duration
 	HealthCheckInterval       time.Duration
 	AvailabilityCheckInterval time.Duration
-}
-
-type SizeConfig struct {
-	WorkerPoolSize int
-	JobQueueSize   int
-	TaskStreamSize int
 }
 
 var DefaultTimeouts = TimeoutConfig{
@@ -32,8 +38,36 @@ var DefaultTimeouts = TimeoutConfig{
 	AvailabilityCheckInterval: 5 * time.Second,
 }
 
+// ----------------------------------------
+
+type SizeConfig struct {
+	WorkerPoolSize  int
+	JobQueueSize    int
+	TaskStreamSize  int
+	MinWorkers      int
+	MaxWorkers      int
+	MaxJobPerWorker int32
+}
+
 var DefaultSizeConfig = SizeConfig{
-	WorkerPoolSize: 10,
-	JobQueueSize:   5000,
-	TaskStreamSize: 1000,
+	WorkerPoolSize:  10,
+	JobQueueSize:    10000,
+	TaskStreamSize:  100000, //change later
+	MinWorkers:      5,
+	MaxWorkers:      1000,
+	MaxJobPerWorker: 500,
+}
+
+// ----------------------------------------
+
+type ScaleConfig struct {
+	ScaleUpQueueLengthThreshold   int
+	ScaleDownQueueLengthThreshold int
+	ScaleCheckInterval            time.Duration
+}
+
+var DefaultScaleConfig = ScaleConfig{
+	ScaleUpQueueLengthThreshold:   100,
+	ScaleDownQueueLengthThreshold: 50,
+	ScaleCheckInterval:            5 * time.Second,
 }
