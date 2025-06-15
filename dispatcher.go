@@ -31,7 +31,7 @@ func NewDispatcher(numWorkers int) *Dispatcher {
 		numWorkers:        numWorkers,
 		metrics:           NewMetrics(),
 		availableWorkers:  make(chan int, numWorkers), // Buffered channel to hold available workers
-		availableSet:      make(map[int]bool),     // Set to track available workers
+		availableSet:      make(map[int]bool),         // Set to track available workers
 		workers:           make(map[int]*Worker),
 		stopCh:            make(chan struct{}),
 		idleTerminationCh: make(chan int, numWorkers),
@@ -63,7 +63,7 @@ func (d *Dispatcher) AddWorker(ctx context.Context) int {
 	workerID := d.nextWorkerID
 	d.nextWorkerID++
 
-	worker := NewWorker(workerID, d.metrics, 5, d)
+	worker := NewWorker(workerID, d.metrics, 5000, d)
 	d.workers[workerID] = worker
 	d.metrics.IncrementTotalWorkers()
 
@@ -181,7 +181,12 @@ func (d *Dispatcher) removeWorkerInternal(workerID int, lock bool) (*Worker, err
 		return nil, fmt.Errorf("worker %d not found for internal removal", workerID)
 	}
 
-	slog.Info("Stopping worker as part of internal removal", "worker_id", workerID)
+	// Clean up worker from available set
+	d.setMU.Lock()
+	delete(d.availableSet, workerID)
+	d.setMU.Unlock()
+
+	// Stop the worker and clean up
 	worker.Stop(d)
 	delete(d.workers, workerID)
 	d.metrics.DecrementTotalWorkers()
@@ -226,7 +231,7 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 				case worker.JobChannel <- job:
 					// slog.Info("📦 Job dispatched to worker", "job_id", job.task.ID, "worker_id", worker.id)
 					w.IncrementJobCount()
-				case <-time.After(500 * time.Millisecond):
+				case <-time.After(DefaultTimeouts.TaskDispatchTimeout):
 					//handle timeout
 					slog.Warn("⏰ Job dispatch to worker timed out", "job_id", job.task.ID, "worker_id", worker.id)
 					err := d.queue.PushToHeap(job.task, d) // Requeue the job
@@ -245,7 +250,7 @@ func (d *Dispatcher) findAvailableWorker() int {
 	select {
 	case workerID := <-d.availableWorkers:
 		d.setMU.Lock()
-		delete(d.availableSet, workerID) // Remove from available set
+		delete(d.availableSet, workerID)
 		d.setMU.Unlock()
 		return workerID
 	default:

@@ -18,8 +18,10 @@ func main() {
 
 	taskStream := make(chan Task, 1000)
 
+	
+
 	//create fixed size worker pool with 5 workers
-	dispatcher := NewDispatcher(300)
+	dispatcher := NewDispatcher(10)
 	go TaskFeeder(ctx, taskStream, dispatcher.metrics)
 
 	dispatcher.Start(ctx)
@@ -39,4 +41,6 @@ func main() {
 	dispatcher.StopDispatch()
 	dispatcher.Wait()
 	fmt.Println("Shutdown complete")
+
+
 }

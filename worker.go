@@ -33,6 +33,7 @@ type Worker struct {
 	jobCount          int32         //tracks the number of jobs in the worker job channel
 	idleSince         atomic.Value
 	idleTimeout       time.Duration
+	config            TimeoutConfig
 }
 
 func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32, d *Dispatcher) *Worker {
@@ -44,7 +45,8 @@ func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32, d *Dispatcher) *
 		stopWorkerChan:    make(chan struct{}),
 		idleTerminationCh: d.idleTerminationCh,
 		jobCount:          0,
-		idleTimeout:       2 * time.Second, // Set idle timeout to 10 seconds
+		idleTimeout:       DefaultTimeouts.WorkerIdleTimeout,
+		config:            DefaultTimeouts,
 	}
 }
 
@@ -96,7 +98,7 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 	defer d.wg.Done()
 	slog.Info("👷 Worker started and ready to process tasks", "worker_id", w.id)
 
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(DefaultTimeouts.AvailabilityCheckInterval)
 	defer ticker.Stop()
 
 	w.signalAvailability(d)
@@ -125,10 +127,12 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 				select {
 				case w.idleTerminationCh <- w.id:
 					slog.Info("👷 Worker successfully notified dispatcher of idle termination", "worker_id", w.id)
-				case <-time.After(2 * time.Second): // Timeout for sending notification
+					return
+				case <-time.After(DefaultTimeouts.WorkerShutdownTimeout): // Timeout for sending notification
 					slog.Warn("⚠️ Worker timeout notifying dispatcher of idle termination. Proceeding with Stop().", "worker_id", w.id)
 				case <-ctx.Done(): // Ensure worker respects context cancellation during notification
 					slog.Info("Context cancelled while notifying dispatcher of idle termination", "worker_id", w.id)
+					return
 				}
 
 				d.removeWorkerInternal(w.id, true)
@@ -154,7 +158,7 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 
 func (w *Worker) processTask(job Job, startTime time.Time) error {
 	slog.Info("👷 Worker processing task", "worker_id", w.id, "task_id", job.task.ID, "priority", job.task.Priority, "name", job.task.Name)
-	time.Sleep(time.Duration(rand.Intn(5000)+500) * time.Millisecond) // Simulate processing time
+	time.Sleep(w.config.TaskProcessingTimeout) // Simulate processing time
 
 	// Simulate failure for ~20% of tasks
 	if rand.Float32() < 0.2 {
