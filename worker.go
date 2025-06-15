@@ -69,9 +69,11 @@ func (w *Worker) signalAvailability(d *Dispatcher) {
 		return
 	}
 
+	//only signal availability if worker is not already available
 	if d.availableSet[w.id] {
 		return
 	}
+
 
 	select {
 	case d.availableWorkers <- w.id:
@@ -152,7 +154,7 @@ func (w *Worker) processTask(job Job, startTime time.Time) error {
 	// time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond) // simulate staggered processing time
 
 	// Simulate failure for ~20% of tasks
-	if rand.Float32() < 0.2 {
+	if rand.Float32() < 0.02 {
 		return fmt.Errorf("simulated failure for task %d", job.task.ID)
 	}
 
@@ -171,20 +173,20 @@ func (w *Worker) processTask(job Job, startTime time.Time) error {
 }
 
 func (w *Worker) IncrementJobCount() {
-	atomic.AddInt32((*int32)(&w.jobCount), 1)
+	atomic.AddInt32(&w.jobCount, 1)
 
 	w.idleSince.Store(time.Time{}) // Reset idle time
 }
 
 func (w *Worker) DecrementJobCount() {
-	count := atomic.AddInt32((*int32)(&w.jobCount), -1)
+	count := atomic.AddInt32(&w.jobCount, -1)
 	if count == 0 {
 		w.idleSince.Store(time.Now())
 	}
 }
 
 func (w *Worker) GetJobCount() int32 {
-	return atomic.LoadInt32((*int32)(&w.jobCount))
+	return atomic.LoadInt32(&w.jobCount)
 }
 
 func (w *Worker) IsIdleLongEnough() bool {

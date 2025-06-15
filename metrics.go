@@ -175,7 +175,7 @@ func (m *Metrics) WriteToLog(logDir string) error {
 // setupMetricsReporting runs in a separate goroutine to report metrics periodically
 func setupMetricsReporting(ctx context.Context, dispatcher *Dispatcher) {
 	go func() {
-		ticker := time.NewTicker(3 * time.Second)
+		ticker := time.NewTicker(DefaultTimeouts.MetricsInterval)
 		defer ticker.Stop()
 
 		logDir := "logs"

@@ -21,7 +21,7 @@ func randomPriority() int {
 }
 
 func TaskFeeder(ctx context.Context, taskstream chan<- Task, metrics *Metrics) {
-	id := 0 
+	id := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -42,7 +42,7 @@ func TaskFeeder(ctx context.Context, taskstream chan<- Task, metrics *Metrics) {
 				id++
 			default:
 				slog.Info("🛑 TaskFeeder queue is full, sleeping for 500ms")
-				time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond) // simulate staggered arrival
+				time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
 			}
 		}
 	}

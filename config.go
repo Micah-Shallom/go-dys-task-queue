@@ -27,7 +27,7 @@ var DefaultTimeouts = TimeoutConfig{
 	TaskDispatchTimeout:       5 * time.Second,
 	TaskProcessingTimeout:     30 * time.Second,
 	TaskRetryTimeout:          1 * time.Second,
-	MetricsInterval:           5 * time.Second,
+	MetricsInterval:           1 * time.Second,
 	HealthCheckInterval:       15 * time.Second,
 	AvailabilityCheckInterval: 5 * time.Second,
 }

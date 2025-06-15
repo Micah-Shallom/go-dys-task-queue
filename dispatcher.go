@@ -99,8 +99,6 @@ func (d *Dispatcher) receiveTasksFromHeap(ctx context.Context) {
 					break // Exit inner loop if no more tasks
 				}
 
-				// time.Sleep(3 * time.Second) //i want to see the accumulation of tasks in the heap
-
 				task := d.queue.taskHeap.Pop()
 				d.metrics.DecrementHeapSize()
 				d.queue.mu.Unlock()
@@ -202,7 +200,6 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 			return
 
 		case job := <-d.queue.jobsQueue:
-			// time.Sleep(10 * time.Second) // Simulate some delay for demonstration
 
 			d.metrics.DecrementJobsQueueCount()
 			workerID := d.findAvailableWorker()
@@ -229,7 +226,6 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 			go func(job Job, w *Worker, wID int) {
 				select {
 				case worker.JobChannel <- job:
-					// slog.Info("📦 Job dispatched to worker", "job_id", job.task.ID, "worker_id", worker.id)
 					w.IncrementJobCount()
 				case <-time.After(DefaultTimeouts.TaskDispatchTimeout):
 					//handle timeout
