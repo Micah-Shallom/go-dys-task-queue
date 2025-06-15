@@ -9,17 +9,8 @@ import (
 	"time"
 )
 
-type WorkerStatus int
-
-const (
-	WorkerStatusIdle WorkerStatus = iota
-	WorkerStatusBusy
-	WorkerStatusStopped
-)
-
 type WorkerHandle struct {
 	ID          int
-	Status      WorkerStatus
 	JobsChannel chan Job
 }
 
@@ -158,7 +149,7 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 
 func (w *Worker) processTask(job Job, startTime time.Time) error {
 	slog.Info("👷 Worker processing task", "worker_id", w.id, "task_id", job.task.ID, "priority", job.task.Priority, "name", job.task.Name)
-	time.Sleep(w.config.TaskProcessingTimeout) // Simulate processing time
+	// time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond) // simulate staggered processing time
 
 	// Simulate failure for ~20% of tasks
 	if rand.Float32() < 0.2 {

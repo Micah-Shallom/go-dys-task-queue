@@ -3,20 +3,21 @@ package main
 import "time"
 
 type TimeoutConfig struct {
-	// Worker timeouts
-	WorkerIdleTimeout     time.Duration // 30 seconds
-	WorkerStartupTimeout  time.Duration // 5 seconds
-	WorkerShutdownTimeout time.Duration // 10 seconds
+	WorkerIdleTimeout         time.Duration
+	WorkerStartupTimeout      time.Duration
+	WorkerShutdownTimeout     time.Duration
+	TaskDispatchTimeout       time.Duration
+	TaskProcessingTimeout     time.Duration
+	TaskRetryTimeout          time.Duration
+	MetricsInterval           time.Duration
+	HealthCheckInterval       time.Duration
+	AvailabilityCheckInterval time.Duration
+}
 
-	// Task processing timeouts
-	TaskDispatchTimeout   time.Duration // 5 seconds
-	TaskProcessingTimeout time.Duration // 30 seconds
-	TaskRetryTimeout      time.Duration // 1 second
-
-	// System timeouts
-	MetricsInterval           time.Duration // 5 seconds
-	HealthCheckInterval       time.Duration // 15 seconds
-	AvailabilityCheckInterval time.Duration // 5 seconds
+type SizeConfig struct {
+	WorkerPoolSize int
+	JobQueueSize   int
+	TaskStreamSize int
 }
 
 var DefaultTimeouts = TimeoutConfig{
@@ -29,4 +30,10 @@ var DefaultTimeouts = TimeoutConfig{
 	MetricsInterval:           5 * time.Second,
 	HealthCheckInterval:       15 * time.Second,
 	AvailabilityCheckInterval: 5 * time.Second,
+}
+
+var DefaultSizeConfig = SizeConfig{
+	WorkerPoolSize: 10,
+	JobQueueSize:   5000,
+	TaskStreamSize: 1000,
 }

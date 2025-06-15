@@ -16,12 +16,16 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	taskStream := make(chan Task, 1000)
+	taskStream := make(chan Task, DefaultSizeConfig.TaskStreamSize)
 
 	
 
 	//create fixed size worker pool with 5 workers
-	dispatcher := NewDispatcher(10)
+	dispatcher := NewDispatcher(DefaultSizeConfig.WorkerPoolSize)
+	go TaskFeeder(ctx, taskStream, dispatcher.metrics)
+	go TaskFeeder(ctx, taskStream, dispatcher.metrics)
+	go TaskFeeder(ctx, taskStream, dispatcher.metrics)
+	go TaskFeeder(ctx, taskStream, dispatcher.metrics)
 	go TaskFeeder(ctx, taskStream, dispatcher.metrics)
 
 	dispatcher.Start(ctx)
@@ -41,6 +45,4 @@ func main() {
 	dispatcher.StopDispatch()
 	dispatcher.Wait()
 	fmt.Println("Shutdown complete")
-
-
 }
