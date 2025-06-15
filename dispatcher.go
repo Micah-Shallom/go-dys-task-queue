@@ -22,19 +22,20 @@ type Dispatcher struct {
 	nextWorkerID      int
 	availableSet      map[int]bool // Set of available worker IDs
 	availableWorkers  chan int
+	config            Config
 }
 
-func NewDispatcher(numWorkers int) *Dispatcher {
-	slog.Info("🚀 Dispatcher initialized", "num workers", numWorkers)
+func NewDispatcher(config SizeConfig) *Dispatcher {
+	slog.Info("🚀 Dispatcher initialized", "num workers", config.WorkerPoolSize)
 	return &Dispatcher{
 		queue:             NewPriorityJobQueue(),
-		numWorkers:        numWorkers,
 		metrics:           NewMetrics(),
-		availableWorkers:  make(chan int, numWorkers), // Buffered channel to hold available workers
-		availableSet:      make(map[int]bool),     // Set to track available workers
+		availableWorkers:  make(chan int, config.WorkerPoolSize), // Buffered channel to hold available workers
+		availableSet:      make(map[int]bool),                    // Set to track available workers
 		workers:           make(map[int]*Worker),
 		stopCh:            make(chan struct{}),
-		idleTerminationCh: make(chan int, numWorkers),
+		idleTerminationCh: make(chan int, config.WorkerPoolSize),
+		config:            NewConfig,
 	}
 }
 
@@ -60,10 +61,15 @@ func (d *Dispatcher) AddWorker(ctx context.Context) int {
 	d.disLock.Lock()
 	defer d.disLock.Unlock()
 
+	if d.numWorkers >= d.config.SizeConfig.MaxWorkers {
+		slog.Warn("🚫 Max workers reached, skipping worker addition")
+		return -1
+	}
+
 	workerID := d.nextWorkerID
 	d.nextWorkerID++
 
-	worker := NewWorker(workerID, d.metrics, 5, d)
+	worker := NewWorker(workerID, d.metrics, d.config.SizeConfig.MaxJobPerWorker, d)
 	d.workers[workerID] = worker
 	d.metrics.IncrementTotalWorkers()
 
@@ -99,8 +105,6 @@ func (d *Dispatcher) receiveTasksFromHeap(ctx context.Context) {
 					break // Exit inner loop if no more tasks
 				}
 
-				// time.Sleep(3 * time.Second) //i want to see the accumulation of tasks in the heap
-
 				task := d.queue.taskHeap.Pop()
 				d.metrics.DecrementHeapSize()
 				d.queue.mu.Unlock()
@@ -111,12 +115,12 @@ func (d *Dispatcher) receiveTasksFromHeap(ctx context.Context) {
 				case d.queue.jobsQueue <- job:
 					d.metrics.IncrementJobsQueueCount()
 				default:
-					slog.Warn("⚠️ jobsQueue is full, skipping task delivery")
+					// slog.Warn("⚠️ jobsQueue is full, skipping task delivery")
 					err := d.queue.PushToHeap(task.(Task), d) // requeue the task
 					if err != nil {
 						slog.Error("❗ Error re-queuing task", "task_id", task.(Task).ID, "err", err)
 					} else {
-						slog.Info("🔄 Task re-queued to the heap", "task_id", task.(Task).ID)
+						// slog.Info("🔄 Task re-queued to the heap", "task_id", task.(Task).ID)
 					}
 					break
 				}
@@ -129,7 +133,7 @@ func (d *Dispatcher) Start(ctx context.Context) {
 	slog.Info("🏁 Starting dispatcher with worker pool...")
 
 	// Spawn workers
-	for i := range d.numWorkers {
+	for i := range d.config.SizeConfig.MinWorkers {
 		_ = i
 		d.AddWorker(ctx)
 	}
@@ -181,7 +185,12 @@ func (d *Dispatcher) removeWorkerInternal(workerID int, lock bool) (*Worker, err
 		return nil, fmt.Errorf("worker %d not found for internal removal", workerID)
 	}
 
-	slog.Info("Stopping worker as part of internal removal", "worker_id", workerID)
+	// Clean up worker from available set
+	d.setMU.Lock()
+	delete(d.availableSet, workerID)
+	d.setMU.Unlock()
+
+	// Stop the worker and clean up
 	worker.Stop(d)
 	delete(d.workers, workerID)
 	d.metrics.DecrementTotalWorkers()
@@ -197,7 +206,6 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 			return
 
 		case job := <-d.queue.jobsQueue:
-			// time.Sleep(10 * time.Second) // Simulate some delay for demonstration
 
 			d.metrics.DecrementJobsQueueCount()
 			workerID := d.findAvailableWorker()
@@ -224,9 +232,8 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 			go func(job Job, w *Worker, wID int) {
 				select {
 				case worker.JobChannel <- job:
-					// slog.Info("📦 Job dispatched to worker", "job_id", job.task.ID, "worker_id", worker.id)
 					w.IncrementJobCount()
-				case <-time.After(500 * time.Millisecond):
+				case <-time.After(DefaultTimeouts.TaskDispatchTimeout):
 					//handle timeout
 					slog.Warn("⏰ Job dispatch to worker timed out", "job_id", job.task.ID, "worker_id", worker.id)
 					err := d.queue.PushToHeap(job.task, d) // Requeue the job
@@ -245,7 +252,7 @@ func (d *Dispatcher) findAvailableWorker() int {
 	select {
 	case workerID := <-d.availableWorkers:
 		d.setMU.Lock()
-		delete(d.availableSet, workerID) // Remove from available set
+		delete(d.availableSet, workerID)
 		d.setMU.Unlock()
 		return workerID
 	default:
@@ -267,4 +274,73 @@ func (d *Dispatcher) StopWorker(worker *Worker) error {
 func (d *Dispatcher) Wait() {
 	d.wg.Wait()
 	slog.Info("🎉 All workers have completed, dispatcher shutdown complete!")
+}
+
+func (d *Dispatcher) ManageWorkerScaling(ctx context.Context) {
+	slog.Info("⚖️ Starting worker scaling manager...")
+	defer slog.Info("🛑 Worker scaling manager stopped")
+
+	ticker := time.NewTicker(d.config.ScaleConfig.ScaleCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("🛑 Worker scaling manager context canceled, stopping")
+			return
+
+		case <-ticker.C:
+			d.setMU.Lock()
+			queueLen := d.queue.taskHeap.Len()
+			d.setMU.Unlock()
+
+			d.disLock.Lock()
+			numWorkers := len(d.workers)
+			d.disLock.Unlock()
+
+			slog.Debug("🔎 Checking scaling conditions", "queue_len", queueLen, "num_workers", numWorkers)
+
+			if queueLen >= d.config.ScaleConfig.ScaleUpQueueLengthThreshold && numWorkers < d.config.SizeConfig.MaxWorkers {
+				d.AddWorker(ctx)
+			} else if queueLen < d.config.ScaleConfig.ScaleDownQueueLengthThreshold && numWorkers > d.config.SizeConfig.MinWorkers {
+				mostIdleWorkerID := d.FindMostIdleWorker()
+				if mostIdleWorkerID != -1 {
+					slog.Info("🗑️ Removing most idle worker", "worker_id", mostIdleWorkerID)
+					err := d.RemoveWorkerByID(mostIdleWorkerID)
+					if err != nil {
+						slog.Error("❗ Error removing most idle worker", "worker_id", mostIdleWorkerID, "err", err)
+					}
+				} else {
+					slog.Warn("⚠️ No idle workers found, skipping worker removal")
+					err := d.RemoveWorkerByID(d.nextWorkerID - 1)
+					if err != nil {
+						slog.Error("❗ Error removing worker", "worker_id", d.nextWorkerID-1, "err", err)
+					}
+				}
+			}
+		}
+	}
+}
+
+func (d *Dispatcher) FindMostIdleWorker() int {
+	d.disLock.Lock()
+	defer d.disLock.Unlock()
+
+	mostIdleWorkerID := -1
+	longestIdleTime := time.Duration(0)
+
+	for id, worker := range d.workers {
+		if worker.GetJobCount() == 0 {
+			idleTime, ok := worker.idleSince.Load().(time.Time)
+			if ok && !idleTime.IsZero() {
+				idleDuration := time.Since(idleTime)
+				if idleDuration > longestIdleTime {
+					longestIdleTime = idleDuration
+					mostIdleWorkerID = id
+				}
+			}
+		}
+	}
+
+	return mostIdleWorkerID
 }

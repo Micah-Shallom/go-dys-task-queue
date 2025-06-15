@@ -5,7 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"sync"
+	"sync/atomic"
 	"time"
+)
+
+var (
+	totalTasksGenerated atomic.Int64
+	closeTaskStream     sync.Once
 )
 
 func randomPriority() int {
@@ -29,6 +36,15 @@ func TaskFeeder(ctx context.Context, taskstream chan<- Task, metrics *Metrics) {
 			close(taskstream)
 			return
 		default:
+			currentCount := totalTasksGenerated.Load()
+			if currentCount > 1_000_000_000 {
+				closeTaskStream.Do(func() {
+					slog.Info("🎯 Reached 1 billion tasks, stopping task production", "total_tasks", currentCount-1)
+					close(taskstream)
+				})
+				return
+			}
+
 			priority := randomPriority()
 			task := Task{
 				ID:       id,
@@ -37,9 +53,14 @@ func TaskFeeder(ctx context.Context, taskstream chan<- Task, metrics *Metrics) {
 			}
 
 			metrics.IncrementTotalTasks()
-			taskstream <- task
-			id++
-			time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond) // simulate staggered arrival
+			select {
+			case taskstream <- task:
+				totalTasksGenerated.Add(1)
+				id++
+			default:
+				slog.Info("🛑 TaskFeeder queue is full, sleeping for 500ms")
+				time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
+			}
 		}
 	}
 }

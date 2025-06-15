@@ -9,17 +9,8 @@ import (
 	"time"
 )
 
-type WorkerStatus int
-
-const (
-	WorkerStatusIdle WorkerStatus = iota
-	WorkerStatusBusy
-	WorkerStatusStopped
-)
-
 type WorkerHandle struct {
 	ID          int
-	Status      WorkerStatus
 	JobsChannel chan Job
 }
 
@@ -33,6 +24,7 @@ type Worker struct {
 	jobCount          int32         //tracks the number of jobs in the worker job channel
 	idleSince         atomic.Value
 	idleTimeout       time.Duration
+	config            TimeoutConfig
 }
 
 func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32, d *Dispatcher) *Worker {
@@ -44,7 +36,8 @@ func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32, d *Dispatcher) *
 		stopWorkerChan:    make(chan struct{}),
 		idleTerminationCh: d.idleTerminationCh,
 		jobCount:          0,
-		idleTimeout:       2 * time.Second, // Set idle timeout to 10 seconds
+		idleTimeout:       DefaultTimeouts.WorkerIdleTimeout,
+		config:            DefaultTimeouts,
 	}
 }
 
@@ -76,9 +69,11 @@ func (w *Worker) signalAvailability(d *Dispatcher) {
 		return
 	}
 
+	//only signal availability if worker is not already available
 	if d.availableSet[w.id] {
 		return
 	}
+
 
 	select {
 	case d.availableWorkers <- w.id:
@@ -96,7 +91,7 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 	defer d.wg.Done()
 	slog.Info("👷 Worker started and ready to process tasks", "worker_id", w.id)
 
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(DefaultTimeouts.AvailabilityCheckInterval)
 	defer ticker.Stop()
 
 	w.signalAvailability(d)
@@ -125,10 +120,12 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 				select {
 				case w.idleTerminationCh <- w.id:
 					slog.Info("👷 Worker successfully notified dispatcher of idle termination", "worker_id", w.id)
-				case <-time.After(2 * time.Second): // Timeout for sending notification
+					return
+				case <-time.After(DefaultTimeouts.WorkerShutdownTimeout): // Timeout for sending notification
 					slog.Warn("⚠️ Worker timeout notifying dispatcher of idle termination. Proceeding with Stop().", "worker_id", w.id)
 				case <-ctx.Done(): // Ensure worker respects context cancellation during notification
 					slog.Info("Context cancelled while notifying dispatcher of idle termination", "worker_id", w.id)
+					return
 				}
 
 				d.removeWorkerInternal(w.id, true)
@@ -154,10 +151,10 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 
 func (w *Worker) processTask(job Job, startTime time.Time) error {
 	slog.Info("👷 Worker processing task", "worker_id", w.id, "task_id", job.task.ID, "priority", job.task.Priority, "name", job.task.Name)
-	time.Sleep(time.Duration(rand.Intn(5000)+500) * time.Millisecond) // Simulate processing time
+	// time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond) // simulate staggered processing time
 
 	// Simulate failure for ~20% of tasks
-	if rand.Float32() < 0.2 {
+	if rand.Float32() < 0.02 {
 		return fmt.Errorf("simulated failure for task %d", job.task.ID)
 	}
 
@@ -176,20 +173,23 @@ func (w *Worker) processTask(job Job, startTime time.Time) error {
 }
 
 func (w *Worker) IncrementJobCount() {
-	atomic.AddInt32((*int32)(&w.jobCount), 1)
-
+	count := atomic.AddInt32(&w.jobCount, 1)
+	if count == 1 {
+		w.metrics.IncrementActiveWorkers()
+	}
 	w.idleSince.Store(time.Time{}) // Reset idle time
 }
 
 func (w *Worker) DecrementJobCount() {
-	count := atomic.AddInt32((*int32)(&w.jobCount), -1)
+	count := atomic.AddInt32(&w.jobCount, -1)
 	if count == 0 {
+		w.metrics.DecrementActiveWorkers()
 		w.idleSince.Store(time.Now())
 	}
 }
 
 func (w *Worker) GetJobCount() int32 {
-	return atomic.LoadInt32((*int32)(&w.jobCount))
+	return atomic.LoadInt32(&w.jobCount)
 }
 
 func (w *Worker) IsIdleLongEnough() bool {
