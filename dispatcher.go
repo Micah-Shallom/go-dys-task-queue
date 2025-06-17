@@ -142,6 +142,7 @@ func (d *Dispatcher) Start(ctx context.Context) {
 
 	go d.dispatch(ctx)
 	go d.handleIdleTermination(ctx)
+	go d.ManageWorkerScaling(ctx)
 
 	go func() {
 		<-ctx.Done()
@@ -230,11 +231,12 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 			}
 
 			go func(job Job, w *Worker, wID int) {
+				w.IncrementJobCount()
 				select {
 				case worker.JobChannel <- job:
-					w.IncrementJobCount()
 				case <-time.After(DefaultTimeouts.TaskDispatchTimeout):
 					//handle timeout
+					w.DecrementJobCount()
 					slog.Warn("⏰ Job dispatch to worker timed out", "job_id", job.task.ID, "worker_id", worker.id)
 					err := d.queue.PushToHeap(job.task, d) // Requeue the job
 					if err != nil {
@@ -291,6 +293,7 @@ func (d *Dispatcher) ManageWorkerScaling(ctx context.Context) {
 
 		case <-ticker.C:
 			d.setMU.Lock()
+			// queueLen := len(d.queue.jobsQueue)
 			queueLen := d.queue.taskHeap.Len()
 			d.setMU.Unlock()
 
@@ -300,24 +303,47 @@ func (d *Dispatcher) ManageWorkerScaling(ctx context.Context) {
 
 			slog.Debug("🔎 Checking scaling conditions", "queue_len", queueLen, "num_workers", numWorkers)
 
-			if queueLen >= d.config.ScaleConfig.ScaleUpQueueLengthThreshold && numWorkers < d.config.SizeConfig.MaxWorkers {
-				d.AddWorker(ctx)
-			} else if queueLen < d.config.ScaleConfig.ScaleDownQueueLengthThreshold && numWorkers > d.config.SizeConfig.MinWorkers {
-				mostIdleWorkerID := d.FindMostIdleWorker()
-				if mostIdleWorkerID != -1 {
-					slog.Info("🗑️ Removing most idle worker", "worker_id", mostIdleWorkerID)
-					err := d.RemoveWorkerByID(mostIdleWorkerID)
-					if err != nil {
-						slog.Error("❗ Error removing most idle worker", "worker_id", mostIdleWorkerID, "err", err)
-					}
-				} else {
-					slog.Warn("⚠️ No idle workers found, skipping worker removal")
-					err := d.RemoveWorkerByID(d.nextWorkerID - 1)
-					if err != nil {
-						slog.Error("❗ Error removing worker", "worker_id", d.nextWorkerID-1, "err", err)
+			desiredWorkers := int(queueLen) / int(d.config.SizeConfig.MaxJobPerWorker)
+			if desiredWorkers < d.config.SizeConfig.MinWorkers {
+				desiredWorkers = d.config.SizeConfig.MinWorkers
+			}
+			if desiredWorkers > d.config.SizeConfig.MaxWorkers {
+				desiredWorkers = d.config.SizeConfig.MaxWorkers
+			}
+
+			if desiredWorkers > numWorkers {
+				for i := numWorkers; i < desiredWorkers; i++ {
+					d.AddWorker(ctx)
+				}
+			} else if desiredWorkers < numWorkers {
+				workersToRemove := numWorkers - desiredWorkers
+				for i := 0; i < workersToRemove; i++ {
+					mostIdleWorkerID := d.FindMostIdleWorker()
+					if mostIdleWorkerID != -1 {
+						d.RemoveWorkerByID(mostIdleWorkerID)
 					}
 				}
 			}
+			
+
+			// if queueLen >= d.config.ScaleConfig.ScaleUpQueueLengthThreshold && int(d.metrics.GetTotalWorkers()) < d.config.SizeConfig.MaxWorkers {
+			// 	d.AddWorker(ctx)
+			// } else if queueLen < d.config.ScaleConfig.ScaleDownQueueLengthThreshold && numWorkers > d.config.SizeConfig.MinWorkers {
+			// 	mostIdleWorkerID := d.FindMostIdleWorker()
+			// 	if mostIdleWorkerID != -1 {
+			// 		slog.Info("🗑️ Removing most idle worker", "worker_id", mostIdleWorkerID)
+			// 		err := d.RemoveWorkerByID(mostIdleWorkerID)
+			// 		if err != nil {
+			// 			slog.Error("❗ Error removing most idle worker", "worker_id", mostIdleWorkerID, "err", err)
+			// 		}
+			// 	} else {
+			// 		slog.Warn("⚠️ No idle workers found, skipping worker removal")
+			// 		err := d.RemoveWorkerByID(d.nextWorkerID - 1)
+			// 		if err != nil {
+			// 			slog.Error("❗ Error removing worker", "worker_id", d.nextWorkerID-1, "err", err)
+			// 		}
+			// 	}
+			// }
 		}
 	}
 }

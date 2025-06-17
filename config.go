@@ -51,7 +51,7 @@ type SizeConfig struct {
 
 var DefaultSizeConfig = SizeConfig{
 	WorkerPoolSize:  10,
-	JobQueueSize:    10000,
+	JobQueueSize:    100000,
 	TaskStreamSize:  100000, //change later
 	MinWorkers:      5,
 	MaxWorkers:      1000,

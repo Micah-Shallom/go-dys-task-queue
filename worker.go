@@ -144,12 +144,15 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 			}
 
 			w.DecrementJobCount()
+
 			w.signalAvailability(d)
 		}
 	}
 }
 
 func (w *Worker) processTask(job Job, startTime time.Time) error {
+
+	
 	slog.Info("👷 Worker processing task", "worker_id", w.id, "task_id", job.task.ID, "priority", job.task.Priority, "name", job.task.Name)
 	// time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond) // simulate staggered processing time
 
@@ -169,6 +172,7 @@ func (w *Worker) processTask(job Job, startTime time.Time) error {
 		w.metrics.RecordSuccess()
 		slog.Info("🟢 Worker completed LOW priority task", "worker_id", w.id, "task_id", job.task.ID, "duration", time.Since(startTime))
 	}
+	
 	return nil
 }
 
@@ -182,7 +186,7 @@ func (w *Worker) IncrementJobCount() {
 
 func (w *Worker) DecrementJobCount() {
 	count := atomic.AddInt32(&w.jobCount, -1)
-	if count == 0 {
+	if count == -1 {
 		w.metrics.DecrementActiveWorkers()
 		w.idleSince.Store(time.Now())
 	}
