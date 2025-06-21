@@ -22,8 +22,8 @@ func main() {
 	dispatcher := NewDispatcher(NewConfig.SizeConfig)
 	go TaskFeeder(ctx, taskStream, dispatcher.metrics)
 	go TaskFeeder(ctx, taskStream, dispatcher.metrics)
-	go TaskFeeder(ctx, taskStream, dispatcher.metrics)
-	go TaskFeeder(ctx, taskStream, dispatcher.metrics)
+	// go TaskFeeder(ctx, taskStream, dispatcher.metrics)
+	// go TaskFeeder(ctx, taskStream, dispatcher.metrics)
 
 	dispatcher.Start(ctx)
 	go Producer(ctx, taskStream, dispatcher)

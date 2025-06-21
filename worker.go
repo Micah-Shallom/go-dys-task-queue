@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -25,6 +26,8 @@ type Worker struct {
 	idleSince         atomic.Value
 	idleTimeout       time.Duration
 	config            TimeoutConfig
+	isActive          bool
+	activeLock        sync.Mutex
 }
 
 func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32, d *Dispatcher) *Worker {
@@ -38,6 +41,8 @@ func NewWorker(id int, metrics *Metrics, maxJobPerWorker int32, d *Dispatcher) *
 		jobCount:          0,
 		idleTimeout:       DefaultTimeouts.WorkerIdleTimeout,
 		config:            DefaultTimeouts,
+		isActive:          false,
+		activeLock:        sync.Mutex{},
 	}
 }
 
@@ -61,30 +66,31 @@ func (w *Worker) Stop(d *Dispatcher) {
 }
 
 func (w *Worker) signalAvailability(d *Dispatcher) {
-	d.setMU.Lock()
-	defer d.setMU.Unlock()
 
-	//only signal availability if worker is not already at max job capacity
+	// Check if worker is active
+	// Check if worker is at max capacity
 	if w.GetJobCount() >= w.maxJobPerWorker {
 		return
 	}
 
-	//only signal availability if worker is not already available
+	// Check if worker is already available
+	d.setMU.RLock()
 	if d.availableSet[w.id] {
+		d.setMU.RUnlock()
 		return
 	}
+	d.setMU.RUnlock()
 
-
+	// Try to signal availability
 	select {
 	case d.availableWorkers <- w.id:
-		//successfully signaled as available
 		slog.Info("👷 Worker signaled availability", "worker_id", w.id, "current_jobs", w.GetJobCount())
-		d.availableSet[w.id] = true // Mark worker as available
+		w.activeLock.Lock()
+		d.availableSet[w.id] = true
+		w.activeLock.Unlock()
 	default:
-		// availableWorkers channel is full, do nothing
 		slog.Debug("👷 Worker could not signal availability, channel full", "worker_id", w.id, "current_jobs", w.GetJobCount())
 	}
-
 }
 
 func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
@@ -103,11 +109,11 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 			return
 		case <-d.stopCh: //general signal from dispatcher
 			slog.Info("👷 Worker received stop signal, stopping", "worker_id", w.id)
-			w.metrics.DecrementActiveWorkers()
+			w.deactivateWorkerMetric()
 			return
 		case <-w.stopWorkerChan: //signal to terminate worker
 			slog.Info("👷 Worker received stop worker signal, stopping", "worker_id", w.id)
-			w.metrics.DecrementActiveWorkers()
+			w.deactivateWorkerMetric()
 			return
 
 		//remember to implement a centralized idle ticker system for higher load scenerios
@@ -152,12 +158,11 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 
 func (w *Worker) processTask(job Job, startTime time.Time) error {
 
-	
-	slog.Info("👷 Worker processing task", "worker_id", w.id, "task_id", job.task.ID, "priority", job.task.Priority, "name", job.task.Name)
+	// slog.Info("👷 Worker processing task", "worker_id", w.id, "task_id", job.task.ID, "priority", job.task.Priority, "name", job.task.Name)
 	// time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond) // simulate staggered processing time
 
 	// Simulate failure for ~20% of tasks
-	if rand.Float32() < 0.02 {
+	if rand.Float32() < 0.002 {
 		return fmt.Errorf("simulated failure for task %d", job.task.ID)
 	}
 
@@ -172,23 +177,37 @@ func (w *Worker) processTask(job Job, startTime time.Time) error {
 		w.metrics.RecordSuccess()
 		slog.Info("🟢 Worker completed LOW priority task", "worker_id", w.id, "task_id", job.task.ID, "duration", time.Since(startTime))
 	}
-	
+
 	return nil
 }
 
 func (w *Worker) IncrementJobCount() {
 	count := atomic.AddInt32(&w.jobCount, 1)
 	if count == 1 {
+		w.activeLock.Lock()
 		w.metrics.IncrementActiveWorkers()
+		w.isActive = true
+		w.activeLock.Unlock()
 	}
 	w.idleSince.Store(time.Time{}) // Reset idle time
 }
 
 func (w *Worker) DecrementJobCount() {
 	count := atomic.AddInt32(&w.jobCount, -1)
-	if count == -1 {
-		w.metrics.DecrementActiveWorkers()
+	if count == 0 {
+		w.deactivateWorkerMetric()
 		w.idleSince.Store(time.Now())
+	}
+}
+
+// deactivateWorkerMetric ensures that the active worker count is decremented
+// if the worker was marked as active. It's safe to call multiple times.
+func (w *Worker) deactivateWorkerMetric() {
+	w.activeLock.Lock()
+	defer w.activeLock.Unlock()
+	if w.isActive {
+		w.metrics.DecrementActiveWorkers()
+		w.isActive = false
 	}
 }
 

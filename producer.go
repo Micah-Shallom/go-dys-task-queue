@@ -37,7 +37,7 @@ func TaskFeeder(ctx context.Context, taskstream chan<- Task, metrics *Metrics) {
 			return
 		default:
 			currentCount := totalTasksGenerated.Load()
-			if currentCount > 10_000_000 {
+			if currentCount > 2_000_000 {
 				closeTaskStream.Do(func() {
 					slog.Info("🎯 Reached 1 billion tasks, stopping task production", "total_tasks", currentCount-1)
 					close(taskstream)

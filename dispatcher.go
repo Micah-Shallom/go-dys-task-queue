@@ -30,7 +30,7 @@ func NewDispatcher(config SizeConfig) *Dispatcher {
 	return &Dispatcher{
 		queue:             NewPriorityJobQueue(),
 		metrics:           NewMetrics(),
-		availableWorkers:  make(chan int, config.WorkerPoolSize), // Buffered channel to hold available workers
+		availableWorkers:  make(chan int, config.MaxWorkers), // Buffered channel to hold available workers
 		availableSet:      make(map[int]bool),                    // Set to track available workers
 		workers:           make(map[int]*Worker),
 		stopCh:            make(chan struct{}),
@@ -230,13 +230,14 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 				continue
 			}
 
+			//investigate if this is the best way to handle the job dispatch
 			go func(job Job, w *Worker, wID int) {
-				w.IncrementJobCount()
 				select {
 				case worker.JobChannel <- job:
+					w.IncrementJobCount()
 				case <-time.After(DefaultTimeouts.TaskDispatchTimeout):
 					//handle timeout
-					w.DecrementJobCount()
+					// w.DecrementJobCount()
 					slog.Warn("⏰ Job dispatch to worker timed out", "job_id", job.task.ID, "worker_id", worker.id)
 					err := d.queue.PushToHeap(job.task, d) // Requeue the job
 					if err != nil {
@@ -293,8 +294,8 @@ func (d *Dispatcher) ManageWorkerScaling(ctx context.Context) {
 
 		case <-ticker.C:
 			d.setMU.Lock()
-			// queueLen := len(d.queue.jobsQueue)
-			queueLen := d.queue.taskHeap.Len()
+			queueLen := len(d.queue.jobsQueue)
+			// queueLen := d.queue.taskHeap.Len()
 			d.setMU.Unlock()
 
 			d.disLock.Lock()
