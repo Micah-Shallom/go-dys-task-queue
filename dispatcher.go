@@ -17,12 +17,13 @@ type Dispatcher struct {
 	numWorkers        int
 	wg                sync.WaitGroup
 	disLock           sync.Mutex
-	setMU             sync.RWMutex
+	availableSetMU    sync.RWMutex
 	metrics           *Metrics
 	nextWorkerID      int
 	availableSet      map[int]bool // Set of available worker IDs
 	availableWorkers  chan int
 	config            Config
+	centralTicker     *time.Ticker
 }
 
 func NewDispatcher(config SizeConfig) *Dispatcher {
@@ -31,11 +32,13 @@ func NewDispatcher(config SizeConfig) *Dispatcher {
 		queue:             NewPriorityJobQueue(),
 		metrics:           NewMetrics(),
 		availableWorkers:  make(chan int, config.MaxWorkers), // Buffered channel to hold available workers
-		availableSet:      make(map[int]bool),                    // Set to track available workers
+		availableSet:      make(map[int]bool),                // Set to track available workers
 		workers:           make(map[int]*Worker),
 		stopCh:            make(chan struct{}),
 		idleTerminationCh: make(chan int, config.WorkerPoolSize),
 		config:            NewConfig,
+		centralTicker:     time.NewTicker(DefaultTimeouts.AvailabilityCheckInterval),
+		availableSetMU:    sync.RWMutex{},
 	}
 }
 
@@ -61,7 +64,7 @@ func (d *Dispatcher) AddWorker(ctx context.Context) int {
 	d.disLock.Lock()
 	defer d.disLock.Unlock()
 
-	if d.numWorkers >= d.config.SizeConfig.MaxWorkers {
+	if d.numWorkers > d.config.SizeConfig.MaxWorkers {
 		slog.Warn("🚫 Max workers reached, skipping worker addition")
 		return -1
 	}
@@ -187,9 +190,9 @@ func (d *Dispatcher) removeWorkerInternal(workerID int, lock bool) (*Worker, err
 	}
 
 	// Clean up worker from available set
-	d.setMU.Lock()
+	d.availableSetMU.Lock()
 	delete(d.availableSet, workerID)
-	d.setMU.Unlock()
+	d.availableSetMU.Unlock()
 
 	// Stop the worker and clean up
 	worker.Stop(d)
@@ -254,9 +257,9 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 func (d *Dispatcher) findAvailableWorker() int {
 	select {
 	case workerID := <-d.availableWorkers:
-		d.setMU.Lock()
+		d.availableSetMU.Lock()
 		delete(d.availableSet, workerID)
-		d.setMU.Unlock()
+		d.availableSetMU.Unlock()
 		return workerID
 	default:
 		return -1 // No available workers
@@ -293,10 +296,10 @@ func (d *Dispatcher) ManageWorkerScaling(ctx context.Context) {
 			return
 
 		case <-ticker.C:
-			d.setMU.Lock()
+			d.availableSetMU.Lock()
 			queueLen := len(d.queue.jobsQueue)
 			// queueLen := d.queue.taskHeap.Len()
-			d.setMU.Unlock()
+			d.availableSetMU.Unlock()
 
 			d.disLock.Lock()
 			numWorkers := len(d.workers)
@@ -325,26 +328,6 @@ func (d *Dispatcher) ManageWorkerScaling(ctx context.Context) {
 					}
 				}
 			}
-			
-
-			// if queueLen >= d.config.ScaleConfig.ScaleUpQueueLengthThreshold && int(d.metrics.GetTotalWorkers()) < d.config.SizeConfig.MaxWorkers {
-			// 	d.AddWorker(ctx)
-			// } else if queueLen < d.config.ScaleConfig.ScaleDownQueueLengthThreshold && numWorkers > d.config.SizeConfig.MinWorkers {
-			// 	mostIdleWorkerID := d.FindMostIdleWorker()
-			// 	if mostIdleWorkerID != -1 {
-			// 		slog.Info("🗑️ Removing most idle worker", "worker_id", mostIdleWorkerID)
-			// 		err := d.RemoveWorkerByID(mostIdleWorkerID)
-			// 		if err != nil {
-			// 			slog.Error("❗ Error removing most idle worker", "worker_id", mostIdleWorkerID, "err", err)
-			// 		}
-			// 	} else {
-			// 		slog.Warn("⚠️ No idle workers found, skipping worker removal")
-			// 		err := d.RemoveWorkerByID(d.nextWorkerID - 1)
-			// 		if err != nil {
-			// 			slog.Error("❗ Error removing worker", "worker_id", d.nextWorkerID-1, "err", err)
-			// 		}
-			// 	}
-			// }
 		}
 	}
 }

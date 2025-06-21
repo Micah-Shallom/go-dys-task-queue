@@ -58,8 +58,8 @@ func TaskFeeder(ctx context.Context, taskstream chan<- Task, metrics *Metrics) {
 				totalTasksGenerated.Add(1)
 				id++
 			default:
-				slog.Info("🛑 TaskFeeder queue is full, sleeping for 500ms")
-				time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
+				slog.Info("🛑 TaskFeeder queue is full, sleeping for 2s")
+				time.Sleep(time.Duration(2 * time.Second))
 			}
 		}
 	}

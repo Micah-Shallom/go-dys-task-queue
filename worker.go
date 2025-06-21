@@ -74,20 +74,20 @@ func (w *Worker) signalAvailability(d *Dispatcher) {
 	}
 
 	// Check if worker is already available
-	d.setMU.RLock()
+	d.availableSetMU.RLock()
 	if d.availableSet[w.id] {
-		d.setMU.RUnlock()
+		d.availableSetMU.RUnlock()
 		return
 	}
-	d.setMU.RUnlock()
+	d.availableSetMU.RUnlock()
 
 	// Try to signal availability
 	select {
 	case d.availableWorkers <- w.id:
 		slog.Info("👷 Worker signaled availability", "worker_id", w.id, "current_jobs", w.GetJobCount())
-		w.activeLock.Lock()
+		d.availableSetMU.Lock()
 		d.availableSet[w.id] = true
-		w.activeLock.Unlock()
+		d.availableSetMU.Unlock()
 	default:
 		slog.Debug("👷 Worker could not signal availability, channel full", "worker_id", w.id, "current_jobs", w.GetJobCount())
 	}
@@ -96,9 +96,6 @@ func (w *Worker) signalAvailability(d *Dispatcher) {
 func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 	defer d.wg.Done()
 	slog.Info("👷 Worker started and ready to process tasks", "worker_id", w.id)
-
-	ticker := time.NewTicker(DefaultTimeouts.AvailabilityCheckInterval)
-	defer ticker.Stop()
 
 	w.signalAvailability(d)
 
@@ -117,7 +114,7 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 			return
 
 		//remember to implement a centralized idle ticker system for higher load scenerios
-		case <-ticker.C:
+		case <-d.centralTicker.C:
 			w.signalAvailability(d)
 
 			if w.idleTimeout > 0 && w.GetJobCount() == 0 && w.IsIdleLongEnough() {
@@ -157,9 +154,6 @@ func (w *Worker) Start(ctx context.Context, d *Dispatcher) {
 }
 
 func (w *Worker) processTask(job Job, startTime time.Time) error {
-
-	// slog.Info("👷 Worker processing task", "worker_id", w.id, "task_id", job.task.ID, "priority", job.task.Priority, "name", job.task.Name)
-	// time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond) // simulate staggered processing time
 
 	// Simulate failure for ~20% of tasks
 	if rand.Float32() < 0.002 {
